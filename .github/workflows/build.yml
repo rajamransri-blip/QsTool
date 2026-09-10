@@ -21,7 +21,36 @@ jobs:
         uses: actions/checkout@v4
 
       # ============================================================
-      # 2. INITIALIZE WORKSPACE & ASSETS
+      # 2. SETUP PYTHON & JAVA RUNTIMES
+      # ============================================================
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      # ============================================================
+      # 3. INSTALL OS BUILD TOOLCHAINS
+      # ============================================================
+      - name: Install System Dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git zip unzip pkg-config \
+            autoconf automake libtool zlib1g-dev \
+            libffi-dev libssl-dev cmake
+
+          pip install --upgrade pip setuptools wheel
+          pip install "cython<3.0.0" buildozer
+
+      # ============================================================
+      # 4. INITIALIZE REPO WORKSPACE
       # ============================================================
       - name: Initialize Workspace
         shell: bash
@@ -34,7 +63,7 @@ jobs:
           fi
 
       # ============================================================
-      # 3. GENERATE PAK ENGINE (qstool/pak.py)
+      # 5. GENERATE PAK ENGINE (qstool/pak.py)
       # ============================================================
       - name: Generate qstool engine
         shell: bash
@@ -220,7 +249,7 @@ jobs:
                   elif entry.compression == "gzip":
                       output = zlib.decompress(raw, 16 + zlib.MAX_WBITS)
                   else:
-                      raise PakError(f"Compression '{entry.compression}' not supported")
+                      raise PakError(f"Compression '{entry.compression}' not supported natively")
 
                   if len(output) != entry.uncompressed_size:
                       raise PakError("Size mismatch during unpacking")
@@ -229,7 +258,7 @@ jobs:
           PY
 
       # ============================================================
-      # 4. GENERATE MAIN APPLICATION (DARK THEME + CRASH-PROOF)
+      # 6. GENERATE MAIN APPLICATION (DARK THEME + CRASH-PROOF)
       # ============================================================
       - name: Generate main.py Application
         shell: bash
@@ -302,7 +331,7 @@ jobs:
                       spacing: dp(6)
 
                       Label:
-                          text: "STORAGE FOLDER"
+                          text: "STORAGE DIRECTORY"
                           font_size: "12sp"
                           bold: True
                           color: 0.38, 0.70, 0.98, 1
@@ -630,7 +659,7 @@ jobs:
           PY
 
       # ============================================================
-      # 5. BUILDOZER SPECIFICATION
+      # 7. BUILDOZER SPECIFICATION
       # ============================================================
       - name: Generate buildozer.spec
         shell: bash
@@ -669,16 +698,19 @@ jobs:
           EOF
 
       # ============================================================
-      # 6. BUILD ANDROID APK (USING BUILDOZER ACTION)
+      # 8. BUILD ANDROID APK (NON-ROOT RUNNER EXECUTION)
       # ============================================================
-      - name: Build with Buildozer
-        uses: ArtemSBulgakov/buildozer-action@v1
-        with:
-          buildozer_version: master
-          command: buildozer -v android debug
+      - name: Build Android APK
+        shell: bash
+        env:
+          LANG: C.UTF-8
+          LC_ALL: C.UTF-8
+        run: |
+          # Buildozer asks for root confirmation if stdin is closed; using pipe 'yes' bypasses prompt safely
+          yes | buildozer -v android debug
 
       # ============================================================
-      # 7. UPLOAD ARTIFACT
+      # 9. UPLOAD APK ARTIFACT
       # ============================================================
       - name: Upload APK
         uses: actions/upload-artifact@v4
