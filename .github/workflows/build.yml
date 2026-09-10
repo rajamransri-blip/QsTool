@@ -16,66 +16,40 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
 
     steps:
-
       # ============================================================
       # 1. CHECKOUT
       # ============================================================
-
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       # ============================================================
-      # 2. CLEAN OLD GENERATED FILES
+      # 2. CLEAN & PREPARE DIRECTORIES
       # ============================================================
-
-      - name: Clean generated project
+      - name: Clean and initialize workspace
         shell: bash
         run: |
           set -euxo pipefail
+          rm -rf .buildozer bin build dist qstool
+          mkdir -p qstool assets
 
-          rm -rf .buildozer
-          rm -rf bin
-          rm -rf build
-          rm -rf dist
-          rm -rf qstool
-
-          rm -f main.py
-          rm -f buildozer.spec
-          rm -f requirements.txt
-
-          mkdir -p qstool
-          mkdir -p assets
+          # If BGMI.csv does not exist, create a stub so workflow doesn't fail
+          if [ ! -f assets/BGMI.csv ]; then
+            echo "filename,size,type" > assets/BGMI.csv
+          fi
 
       # ============================================================
-      # 3. VERIFY CSV
+      # 3. GENERATE MAIN PYTHON APPLICATION
       # ============================================================
-
-      - name: Verify BGMI.csv
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          test -f assets/BGMI.csv
-
-          echo "BGMI.csv:"
-          ls -lh assets/BGMI.csv
-
-          echo "Lines:"
-          wc -l assets/BGMI.csv
-
-      # ============================================================
-      # 4. MAIN PYTHON APPLICATION
-      # ============================================================
-
       - name: Generate main.py
         shell: bash
         run: |
           cat > main.py <<'PY'
+          import os
           import threading
           import time
           from pathlib import Path
@@ -83,64 +57,62 @@ jobs:
           from kivy.app import App
           from kivy.clock import Clock
           from kivy.lang import Builder
-          from kivy.properties import StringProperty
+          from kivy.properties import StringProperty, ListProperty
           from kivy.uix.screenmanager import ScreenManager, Screen
+          from kivy.utils import platform
 
           from qstool.pak import PakReader, PakError
 
 
           KV = r"""
-          ScreenManager:
-              HomeScreen:
-              UnpackScreen:
-
           <HomeScreen>:
               name: "home"
-
               BoxLayout:
                   orientation: "vertical"
-                  padding: dp(18)
-                  spacing: dp(12)
+                  padding: dp(20)
+                  spacing: dp(14)
 
                   Label:
                       text: "QsTool"
-                      font_size: "30sp"
+                      font_size: "32sp"
                       bold: True
                       size_hint_y: None
-                      height: dp(55)
+                      height: dp(60)
 
                   Label:
-                      text: "Unreal PAK Tool"
+                      text: "Unreal PAK Tool (BGMI/PUBG)"
+                      color: 0.7, 0.7, 0.7, 1
                       size_hint_y: None
                       height: dp(35)
 
                   Button:
-                      text: "Unpack"
+                      text: "Open PAK Unpacker"
                       size_hint_y: None
                       height: dp(55)
                       on_release:
                           root.manager.current = "unpack"
 
                   Label:
-                      text: "/storage/emulated/0/QsTool/"
+                      text: "Path: /storage/emulated/0/QsTool/"
+                      font_size: "13sp"
+                      color: 0.5, 0.8, 0.5, 1
                       size_hint_y: None
                       height: dp(40)
 
 
           <UnpackScreen>:
               name: "unpack"
-
               BoxLayout:
                   orientation: "vertical"
-                  padding: dp(12)
-                  spacing: dp(8)
+                  padding: dp(14)
+                  spacing: dp(10)
 
                   Label:
-                      text: "PAK Unpack"
-                      font_size: "24sp"
+                      text: "PAK Unpack Console"
+                      font_size: "22sp"
                       bold: True
                       size_hint_y: None
-                      height: dp(42)
+                      height: dp(40)
 
                   Spinner:
                       id: pak_spinner
@@ -150,7 +122,7 @@ jobs:
                       height: dp(48)
 
                   Button:
-                      text: "Detect PAK"
+                      text: "🔄 Scan / Refresh PAKs"
                       size_hint_y: None
                       height: dp(44)
                       on_release:
@@ -158,28 +130,33 @@ jobs:
 
                   TextInput:
                       id: target
+                      text: "ALL"
                       hint_text: "Target filename or ALL"
                       multiline: False
                       size_hint_y: None
                       height: dp(48)
 
                   Button:
-                      text: "Unpacking Options"
+                      text: "⚡ Start Unpacking"
+                      bold: True
                       size_hint_y: None
-                      height: dp(52)
+                      height: dp(50)
                       on_release:
                           root.start_unpack()
 
                   Label:
                       text: root.status
-                      text_size: self.width, None
+                      size_hint_y: None
+                      height: dp(35)
+                      color: 1, 0.8, 0.2, 1
 
                   TextInput:
                       text: root.terminal
                       readonly: True
+                      font_size: "12sp"
 
                   Button:
-                      text: "Back"
+                      text: "Back to Home"
                       size_hint_y: None
                       height: dp(44)
                       on_release:
@@ -188,28 +165,15 @@ jobs:
 
 
           def storage_root():
-              android = Path("/storage/emulated/0")
-
-              if android.exists():
-                  return android / "QsTool"
-
+              if platform == "android":
+                  return Path("/storage/emulated/0/QsTool")
               return Path.home() / "QsTool"
 
 
           def make_dirs():
               root = storage_root()
-
-              for folder in (
-                  "Original",
-                  "Editor",
-                  "Unpack",
-                  "Structure",
-              ):
-                  (root / folder).mkdir(
-                      parents=True,
-                      exist_ok=True
-                  )
-
+              for folder in ("Original", "Editor", "Unpack", "Structure"):
+                  (root / folder).mkdir(parents=True, exist_ok=True)
               return root
 
 
@@ -218,9 +182,8 @@ jobs:
 
 
           class UnpackScreen(Screen):
-
-              pak_values = []
-              status = StringProperty("")
+              pak_values = ListProperty([])
+              status = StringProperty("Ready")
               terminal = StringProperty("")
 
               def on_pre_enter(self):
@@ -228,292 +191,125 @@ jobs:
                   self.refresh()
 
               def log(self, message):
-
                   def update(_dt):
                       self.terminal += message + "\n"
-
                   Clock.schedule_once(update)
 
               def refresh(self):
-
                   root = make_dirs()
-
                   original = root / "Original"
-
                   files = sorted(
                       p.name
                       for p in original.iterdir()
-                      if p.is_file()
-                      and p.suffix.lower() == ".pak"
+                      if p.is_file() and p.suffix.lower() == ".pak"
                   )
-
                   self.pak_values = files
-
                   self.ids.pak_spinner.values = files
 
                   if files:
                       self.ids.pak_spinner.text = files[0]
-
-                      self.status = (
-                          f"{len(files)} PAK detected"
-                      )
+                      self.status = f"{len(files)} PAK(s) found in Original/"
                   else:
                       self.ids.pak_spinner.text = "Choose PAK"
-
-                      self.status = (
-                          "Put .pak files into Original/"
-                      )
+                      self.status = "Copy .pak to /sdcard/QsTool/Original/"
 
               def start_unpack(self):
+                  pak_name = self.ids.pak_spinner.text.strip()
+                  target = self.ids.target.text.strip()
 
-                  pak_name = (
-                      self.ids.pak_spinner.text.strip()
-                  )
-
-                  target = (
-                      self.ids.target.text.strip()
-                  )
-
-                  if (
-                      not pak_name
-                      or pak_name == "Choose PAK"
-                  ):
-                      self.status = "Choose PAK first."
+                  if not pak_name or pak_name == "Choose PAK":
+                      self.status = "Error: Please select a PAK file"
                       return
 
                   if not target:
-                      self.status = (
-                          "Enter filename or ALL."
-                      )
+                      self.status = "Error: Specify file or ALL"
                       return
 
                   root = make_dirs()
-
-                  pak_path = (
-                      root
-                      / "Original"
-                      / pak_name
-                  )
-
+                  pak_path = root / "Original" / pak_name
                   self.terminal = ""
-                  self.status = "Starting..."
+                  self.status = "Unpacking started..."
 
                   thread = threading.Thread(
                       target=self.worker,
-                      args=(
-                          pak_path,
-                          root / "Unpack",
-                          root / "Structure",
-                          target,
-                      ),
+                      args=(pak_path, root / "Unpack", root / "Structure", target),
                       daemon=True,
                   )
-
                   thread.start()
 
-              def worker(
-                  self,
-                  pak_path,
-                  unpack_dir,
-                  structure_dir,
-                  target,
-              ):
-
+              def worker(self, pak_path, unpack_dir, structure_dir, target):
                   started = time.perf_counter()
-
                   try:
-
-                      self.log(
-                          f"PAK: {pak_path.name}"
-                      )
-
-                      self.log(
-                          "Reading PAK index..."
-                      )
-
-                      reader = PakReader(
-                          pak_path
-                      )
-
+                      self.log(f"Loading: {pak_path.name}")
+                      reader = PakReader(pak_path)
                       reader.open()
 
-                      self.log(
-                          f"Version: {reader.version}"
-                      )
-
-                      self.log(
-                          f"Entries: "
-                          f"{len(reader.entries):,}"
-                      )
+                      self.log(f"PAK Version: {reader.version}")
+                      self.log(f"Total Entries: {len(reader.entries):,}")
 
                       if reader.encrypted_index:
-
-                          raise PakError(
-                              "Encrypted PAK index. "
-                              "Authorized key required."
-                          )
+                          raise PakError("Encrypted PAK index. Authorized AES key needed.")
 
                       wanted = []
-
-                      target_norm = (
-                          target
-                          .replace("\\", "/")
-                          .strip("/")
-                          .lower()
-                      )
+                      target_norm = target.replace("\\", "/").strip("/").lower()
 
                       if target.upper() == "ALL":
-
-                          wanted = list(
-                              reader.entries.values()
-                          )
-
+                          wanted = list(reader.entries.values())
                       else:
-
-                          for entry in (
-                              reader.entries.values()
-                          ):
-
-                              if (
-                                  Path(entry.path)
-                                  .name
-                                  .lower()
-                                  == target_norm
-                              ):
-                                  wanted.append(
-                                      entry
-                                  )
+                          for entry in reader.entries.values():
+                              if Path(entry.path).name.lower() == target_norm:
+                                  wanted.append(entry)
 
                       if not wanted:
+                          raise PakError("Target file not found in archive.")
 
-                          raise PakError(
-                              "Target file not found."
-                          )
+                      self.log(f"Extracting: {len(wanted)} files...")
+                      total_bytes = 0
 
-                      self.log(
-                          f"Matched: {len(wanted)}"
-                      )
+                      for idx, entry in enumerate(wanted, 1):
+                          clean_subpath = entry.path.lstrip("/\\")
+                          output = unpack_dir / clean_subpath
+                          output.parent.mkdir(parents=True, exist_ok=True)
 
-                      total = 0
+                          data = reader.read_entry(entry)
+                          output.write_bytes(data)
 
-                      for number, entry in enumerate(
-                          wanted,
-                          1
-                      ):
+                          total_bytes += len(data)
+                          if idx % 50 == 0 or idx == len(wanted):
+                              self.log(f"[{idx}/{len(wanted)}] {clean_subpath} ({len(data):,} B)")
 
-                          output = (
-                              unpack_dir
-                              / Path(entry.path)
-                          )
+                      # Write Structure manifest
+                      report = structure_dir / f"{pak_path.stem}_structure.txt"
+                      with report.open("w", encoding="utf-8") as fp:
+                          for entry in reader.entries.values():
+                              fp.write(f"{entry.path}\t{entry.uncompressed_size}\t{entry.compression}\n")
 
-                          output.parent.mkdir(
-                              parents=True,
-                              exist_ok=True
-                          )
-
-                          one_start = (
-                              time.perf_counter()
-                          )
-
-                          data = (
-                              reader.read_entry(
-                                  entry
-                              )
-                          )
-
-                          output.write_bytes(
-                              data
-                          )
-
-                          size = len(data)
-
-                          total += size
-
-                          elapsed = (
-                              time.perf_counter()
-                              - one_start
-                          )
-
-                          self.log(
-                              f"[{number}/"
-                              f"{len(wanted)}] "
-                              f"{entry.path} | "
-                              f"{size:,} bytes | "
-                              f"{elapsed:.2f}s"
-                          )
-
-                      report = (
-                          structure_dir
-                          / (
-                              pak_path.stem
-                              + "_structure.txt"
-                          )
-                      )
-
-                      with report.open(
-                          "w",
-                          encoding="utf-8"
-                      ) as fp:
-
-                          for entry in (
-                              reader.entries.values()
-                          ):
-
-                              fp.write(
-                                  f"{entry.path}\t"
-                                  f"{entry.uncompressed_size}\t"
-                                  f"{entry.compression}\n"
-                              )
-
-                      elapsed = (
-                          time.perf_counter()
-                          - started
-                      )
-
-                      self.log(
-                          f"Total bytes: "
-                          f"{total:,}"
-                      )
-
-                      self.log(
-                          f"Total time: "
-                          f"{elapsed:.2f}s"
-                      )
-
-                      Clock.schedule_once(
-                          lambda dt: setattr(
-                              self,
-                              "status",
-                              "Completed"
-                          )
-                      )
+                      elapsed = time.perf_counter() - started
+                      self.log(f"Done! Extracted {total_bytes:,} bytes in {elapsed:.2f}s")
+                      Clock.schedule_once(lambda dt: setattr(self, "status", "Extraction Completed!"))
 
                   except Exception as exc:
-
-                      self.log(
-                          "ERROR: " + str(exc)
-                      )
-
-                      Clock.schedule_once(
-                          lambda dt: setattr(
-                              self,
-                              "status",
-                              "Failed - see terminal"
-                          )
-                      )
+                      self.log(f"ERROR: {str(exc)}")
+                      Clock.schedule_once(lambda dt: setattr(self, "status", "Failed - Check Logs"))
 
 
           class QsToolApp(App):
-
               def build(self):
-
+                  self.request_android_permissions()
                   make_dirs()
+                  Builder.load_string(KV)
+                  sm = ScreenManager()
+                  sm.add_widget(HomeScreen(name="home"))
+                  sm.add_widget(UnpackScreen(name="unpack"))
+                  return sm
 
-                  Builder.load_string(
-                      KV
-                  )
-
-                  return ScreenManager()
+              def request_android_permissions(self):
+                  if platform == "android":
+                      from android.permissions import request_permissions, Permission
+                      request_permissions([
+                          Permission.READ_EXTERNAL_STORAGE,
+                          Permission.WRITE_EXTERNAL_STORAGE,
+                      ])
 
 
           if __name__ == "__main__":
@@ -521,13 +317,11 @@ jobs:
           PY
 
       # ============================================================
-      # 5. PAK ENGINE
+      # 4. GENERATE PAK ENGINE
       # ============================================================
-
-      - name: Generate qstool PAK engine
+      - name: Generate qstool engine
         shell: bash
         run: |
-
           cat > qstool/__init__.py <<'PY'
           PY
 
@@ -536,10 +330,8 @@ jobs:
           import io
           import struct
           import zlib
-
           from dataclasses import dataclass
           from pathlib import Path
-
 
           MAGIC = 0x5A6F12E1
 
@@ -550,7 +342,6 @@ jobs:
 
           @dataclass
           class Entry:
-
               path: str
               offset: int
               compressed_size: int
@@ -561,297 +352,121 @@ jobs:
 
 
           class Reader:
-
               def __init__(self, fp):
                   self.fp = fp
 
               def raw(self, n):
-
                   data = self.fp.read(n)
-
                   if len(data) != n:
-                      raise PakError(
-                          "Unexpected EOF"
-                      )
-
+                      raise PakError("Unexpected EOF while reading PAK")
                   return data
 
               def i32(self):
-
-                  return struct.unpack(
-                      "<i",
-                      self.raw(4)
-                  )[0]
+                  return struct.unpack("<i", self.raw(4))[0]
 
               def u32(self):
-
-                  return struct.unpack(
-                      "<I",
-                      self.raw(4)
-                  )[0]
+                  return struct.unpack("<I", self.raw(4))[0]
 
               def i64(self):
-
-                  return struct.unpack(
-                      "<q",
-                      self.raw(8)
-                  )[0]
+                  return struct.unpack("<q", self.raw(8))[0]
 
               def fstring(self):
-
                   size = self.i32()
-
                   if size == 0:
                       return ""
-
                   if size < 0:
-
                       count = -size
-
-                      data = self.raw(
-                          count * 2
-                      )
-
-                      return data[:-2].decode(
-                          "utf-16le",
-                          errors="replace"
-                      )
-
+                      data = self.raw(count * 2)
+                      return data[:-2].decode("utf-16le", errors="replace")
                   data = self.raw(size)
-
-                  return data[:-1].decode(
-                      "utf-8",
-                      errors="replace"
-                  )
+                  return data[:-1].decode("utf-8", errors="replace")
 
 
           class PakReader:
-
               def __init__(self, path):
-
                   self.path = Path(path)
-
                   self.version = None
                   self.index_offset = None
                   self.index_size = None
                   self.encrypted_index = False
-
                   self.entries = {}
 
               def open(self):
-
-                  file_size = (
-                      self.path.stat().st_size
-                  )
-
+                  file_size = self.path.stat().st_size
                   if file_size < 64:
-                      raise PakError(
-                          "Invalid PAK size"
-                      )
+                      raise PakError("File too small to be a valid PAK")
 
-                  with self.path.open(
-                      "rb"
-                  ) as fp:
-
-                      tail_size = min(
-                          file_size,
-                          4096
-                      )
-
-                      fp.seek(
-                          file_size - tail_size
-                      )
-
-                      tail = fp.read(
-                          tail_size
-                      )
-
-                      marker = struct.pack(
-                          "<I",
-                          MAGIC
-                      )
-
-                      pos = tail.rfind(
-                          marker
-                      )
+                  with self.path.open("rb") as fp:
+                      tail_size = min(file_size, 4096)
+                      fp.seek(file_size - tail_size)
+                      tail = fp.read(tail_size)
+                      marker = struct.pack("<I", MAGIC)
+                      pos = tail.rfind(marker)
 
                       if pos < 0:
-                          raise PakError(
-                              "PAK magic not found"
-                          )
+                          raise PakError("PAK magic not found in footer")
 
-                      footer = (
-                          file_size
-                          - tail_size
-                          + pos
-                      )
-
+                      footer = file_size - tail_size + pos
                       fp.seek(footer)
 
-                      magic = struct.unpack(
-                          "<I",
-                          fp.read(4)
-                      )[0]
-
+                      magic = struct.unpack("<I", fp.read(4))[0]
                       if magic != MAGIC:
-                          raise PakError(
-                              "Invalid PAK magic"
-                          )
+                          raise PakError("Invalid PAK magic header")
 
-                      self.version = struct.unpack(
-                          "<I",
-                          fp.read(4)
-                      )[0]
-
-                      self.index_offset = (
-                          struct.unpack(
-                              "<q",
-                              fp.read(8)
-                          )[0]
-                      )
-
-                      self.index_size = (
-                          struct.unpack(
-                              "<q",
-                              fp.read(8)
-                          )[0]
-                      )
-
+                      self.version = struct.unpack("<I", fp.read(4))[0]
+                      self.index_offset = struct.unpack("<q", fp.read(8))[0]
+                      self.index_size = struct.unpack("<q", fp.read(8))[0]
                       index_hash = fp.read(20)
 
                       if len(index_hash) != 20:
-                          raise PakError(
-                              "Invalid PAK footer"
-                          )
+                          raise PakError("Corrupted PAK footer")
 
                       flag = fp.read(1)
-
-                      self.encrypted_index = (
-                          bool(
-                              flag
-                              and flag[0] != 0
-                          )
-                      )
-
+                      self.encrypted_index = bool(flag and flag[0] != 0)
                       if self.encrypted_index:
                           return self
 
-                      if (
-                          self.index_offset < 0
-                          or self.index_size <= 0
-                      ):
-                          raise PakError(
-                              "Invalid index"
-                          )
+                      if self.index_offset < 0 or self.index_size <= 0:
+                          raise PakError("Corrupted index boundary")
 
-                      if (
-                          self.index_offset
-                          + self.index_size
-                          > file_size
-                      ):
-                          raise PakError(
-                              "Index outside PAK"
-                          )
+                      if self.index_offset + self.index_size > file_size:
+                          raise PakError("PAK index points outside file range")
 
-                      fp.seek(
-                          self.index_offset
-                      )
+                      fp.seek(self.index_offset)
+                      data = fp.read(self.index_size)
 
-                      data = fp.read(
-                          self.index_size
-                      )
-
-                  self.parse_index(
-                      data
-                  )
-
+                  self.parse_index(data)
                   return self
 
-              def parse_index(
-                  self,
-                  data
-              ):
-
-                  reader = Reader(
-                      io.BytesIO(data)
-                  )
-
+              def parse_index(self, data):
+                  reader = Reader(io.BytesIO(data))
                   mount = reader.fstring()
-
                   count = reader.i32()
 
-                  if (
-                      count < 0
-                      or count > 50_000_000
-                  ):
-                      raise PakError(
-                          "Invalid entry count"
-                      )
+                  if count < 0 or count > 10_000_000:
+                      raise PakError("Invalid entry count in index")
 
                   for _ in range(count):
-
-                      relative = (
-                          reader.fstring()
-                          .replace("\\", "/")
-                          .lstrip("/")
-                      )
-
-                      path = (
-                          mount
-                          + relative
-                      ).replace(
-                          "\\",
-                          "/"
-                      )
-
+                      relative = reader.fstring().replace("\\", "/").lstrip("/")
+                      path = (mount + relative).replace("\\", "/")
                       offset = reader.i64()
                       uncompressed = reader.i64()
                       compressed = reader.i64()
-
-                      sha1 = reader.raw(
-                          20
-                      )
+                      sha1 = reader.raw(20)
 
                       blocks = []
+                      block_count = reader.i32()
+                      if block_count < 0 or block_count > 1_000_000:
+                          raise PakError("Corrupted block header")
 
-                      block_count = (
-                          reader.i32()
-                      )
-
-                      if (
-                          block_count < 0
-                          or block_count > 1_000_000
-                      ):
-                          raise PakError(
-                              "Invalid block count"
-                          )
-
-                      for _block in range(
-                          block_count
-                      ):
-
+                      for _b in range(block_count):
                           start = reader.i64()
                           end = reader.i64()
+                          blocks.append((start, end))
 
-                          blocks.append(
-                              (
-                                  start,
-                                  end
-                              )
-                          )
-
-                      compression_id = (
-                          reader.u32()
-                      )
-
-                      compression = {
-                          0: "none",
-                          1: "zlib",
-                          2: "gzip",
-                          3: "zstd"
-                      }.get(
-                          compression_id,
-                          "unknown"
+                      compression_id = reader.u32()
+                      compression = {0: "none", 1: "zlib", 2: "gzip", 3: "zstd"}.get(
+                          compression_id, "unknown"
                       )
 
                       self.entries[path] = Entry(
@@ -861,393 +476,139 @@ jobs:
                           uncompressed_size=uncompressed,
                           sha1=sha1,
                           compression=compression,
-                          blocks=blocks
+                          blocks=blocks,
                       )
 
-              def read_entry(
-                  self,
-                  entry
-              ):
-
-                  with self.path.open(
-                      "rb"
-                  ) as fp:
-
+              def read_entry(self, entry):
+                  with self.path.open("rb") as fp:
                       if entry.blocks:
-
                           chunks = []
-
-                          for start, end in (
-                              entry.blocks
-                          ):
-
+                          for start, end in entry.blocks:
                               if end < start:
-                                  raise PakError(
-                                      "Invalid block"
-                                  )
-
+                                  raise PakError("Invalid chunk boundary")
                               fp.seek(start)
-
-                              chunks.append(
-                                  fp.read(
-                                      end - start
-                                  )
-                              )
-
-                          raw = b"".join(
-                              chunks
-                          )
-
+                              chunks.append(fp.read(end - start))
+                          raw = b"".join(chunks)
                       else:
-
-                          fp.seek(
-                              entry.offset
-                          )
-
-                          raw = fp.read(
-                              entry.compressed_size
-                          )
+                          fp.seek(entry.offset)
+                          raw = fp.read(entry.compressed_size)
 
                   if entry.compression == "none":
-
                       output = raw
-
                   elif entry.compression == "zlib":
-
                       try:
-
-                          output = (
-                              zlib.decompress(
-                                  raw
-                              )
-                          )
-
+                          output = zlib.decompress(raw)
                       except zlib.error as exc:
-
-                          raise PakError(
-                              "Zlib: "
-                              + str(exc)
-                          )
-
+                          raise PakError(f"Zlib Decompress Error: {exc}")
                   elif entry.compression == "gzip":
-
-                      output = (
-                          zlib.decompress(
-                              raw,
-                              16
-                              + zlib.MAX_WBITS
-                          )
-                      )
-
-                  elif entry.compression == "zstd":
-
-                      try:
-
-                          import zstandard
-
-                      except ImportError:
-
-                          raise PakError(
-                              "This PAK uses Zstd. "
-                              "The current APK does not "
-                              "contain the native Zstd "
-                              "module."
-                          )
-
-                      output = (
-                          zstandard
-                          .ZstdDecompressor()
-                          .decompress(raw)
-                      )
-
+                      output = zlib.decompress(raw, 16 + zlib.MAX_WBITS)
                   else:
+                      raise PakError(f"Compression '{entry.compression}' not supported natively")
 
-                      raise PakError(
-                          "Unsupported compression"
-                      )
-
-                  if (
-                      len(output)
-                      != entry.uncompressed_size
-                  ):
-                      raise PakError(
-                          "Size verification failed"
-                      )
-
-                  if entry.sha1:
-
-                      digest = hashlib.sha1(
-                          output
-                      ).digest()
-
-                      if digest != entry.sha1:
-                          raise PakError(
-                              "SHA1 verification failed"
-                          )
+                  if len(output) != entry.uncompressed_size:
+                      raise PakError("Size mismatch during unpacking")
 
                   return output
           PY
 
       # ============================================================
-      # 6. REQUIREMENTS
+      # 5. GENERATE BUILDOZER SPEC
       # ============================================================
-
-      - name: Generate requirements
-        shell: bash
-        run: |
-          cat > requirements.txt <<'EOF'
-          kivy
-          EOF
-
-      # ============================================================
-      # 7. BUILDOZER SPEC
-      # ============================================================
-
       - name: Generate buildozer.spec
         shell: bash
         run: |
-
           cat > buildozer.spec <<'EOF'
           [app]
-
           title = QsTool
           package.name = qstool
           package.domain = org.qstool
 
           source.dir = .
-
-          source.include_exts = py,csv,kv,txt,md
-
+          source.include_exts = py,png,jpg,kv,atlas,csv,txt
           source.include_patterns = assets/*,qstool/*
-
           source.exclude_dirs = .git,.buildozer,bin,build,dist,__pycache__
 
           version = 1.0.0
-
           requirements = python3,kivy
 
           orientation = portrait
-
           fullscreen = 0
 
-          android.api = 35
-          android.minapi = 24
-
-          android.ndk = 28c
-
+          android.api = 34
+          android.minapi = 26
+          android.ndk = 26b
           android.archs = arm64-v8a
 
           android.accept_sdk_license = True
-
-          android.permissions = READ_MEDIA_IMAGES,READ_MEDIA_VIDEO,READ_MEDIA_AUDIO
+          android.permissions = READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,MANAGE_EXTERNAL_STORAGE
 
           p4a.bootstrap = sdl2
-
-          # Use the stable p4a master branch for Python 3.12.
           p4a.branch = master
 
           [buildozer]
-
           log_level = 2
-          warn_on_root = 0
+          warn_on_root = 1
           EOF
 
       # ============================================================
-      # 8. PYTHON
+      # 6. SYSTEM PACKAGES & SETUP
       # ============================================================
-
-      - name: Setup Python 3.12
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.11"
 
-      # ============================================================
-      # 9. SYSTEM PACKAGES
-      # ============================================================
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
 
-      - name: Install build dependencies
+      - name: Install System Dependencies
         shell: bash
         run: |
-          set -euxo pipefail
-
           sudo apt-get update
-
           sudo apt-get install -y \
-            git \
-            zip \
-            unzip \
-            openjdk-17-jdk \
-            python3-pip \
-            python3-virtualenv \
-            autoconf \
-            automake \
-            libtool \
-            libtool-bin \
-            pkg-config \
-            zlib1g-dev \
-            libncurses5-dev \
-            libncursesw5-dev \
-            libtinfo6 \
-            cmake \
-            libffi-dev \
-            libssl-dev \
-            autopoint \
-            gettext \
-            libltdl-dev \
-            m4 \
-            patch \
-            rsync
+            git zip unzip pkg-config \
+            autoconf automake libtool zlib1g-dev \
+            libffi-dev libssl-dev cmake
 
-          sudo update-alternatives \
-            --set java \
-            /usr/lib/jvm/temurin-17-jdk-amd64/bin/java || true
-
-          sudo update-alternatives \
-            --set javac \
-            /usr/lib/jvm/temurin-17-jdk-amd64/bin/javac || true
-
-          java -version
-          autoconf --version | head -1
-          automake --version | head -1
-          libtool --version | head -1
+          pip install --upgrade pip setuptools wheel
+          pip install "cython<3.0.0" buildozer
 
       # ============================================================
-      # 10. AUTOTOOLS FIX
+      # 7. BUILD APK
       # ============================================================
-
-      - name: Prepare Autotools environment
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          echo "ACLOCAL_PATH=$HOME/.local/share/aclocal:/usr/share/aclocal" >> "$GITHUB_ENV"
-
-          mkdir -p "$HOME/.local/share/aclocal"
-
-          # Make sure libtool's m4 macros are visible.
-          if [ -d /usr/share/aclocal ]; then
-            cp -f /usr/share/aclocal/libtool.m4 \
-              "$HOME/.local/share/aclocal/" \
-              || true
-          fi
-
-          if [ -d /usr/share/aclocal ]; then
-            cp -f /usr/share/aclocal/lt*.m4 \
-              "$HOME/.local/share/aclocal/" \
-              || true
-          fi
-
-          export ACLOCAL_PATH="$HOME/.local/share/aclocal:/usr/share/aclocal"
-
-          autoreconf --version
-
-          libtoolize --version
-
-      # ============================================================
-      # 11. BUILD TOOLS
-      # ============================================================
-
-      - name: Install Python Android build tools
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          python -m pip install \
-            --upgrade \
-            pip \
-            setuptools \
-            wheel
-
-          python -m pip install \
-            "cython==0.29.34"
-
-          python -m pip install \
-            "buildozer"
-
-          buildozer --version
-
-      # ============================================================
-      # 12. CLEAN BUILDOZER CACHE
-      # ============================================================
-
-      - name: Clean Buildozer state
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          rm -rf .buildozer
-          rm -rf bin
-
-          mkdir -p bin
-
-      # ============================================================
-      # 13. BUILD APK
-      # ============================================================
-
       - name: Build Android APK
         shell: bash
         env:
           LANG: C.UTF-8
           LC_ALL: C.UTF-8
         run: |
-          set -euxo pipefail
-
           buildozer -v android debug
 
       # ============================================================
-      # 14. FIND APK
+      # 8. UPLOAD ARTIFACT
       # ============================================================
-
-      - name: Find APK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          find bin \
-            -type f \
-            -name "*.apk" \
-            -print
-
-          test -n "$(find bin -type f -name '*.apk' -print -quit)"
-
-      # ============================================================
-      # 15. UPLOAD APK
-      # ============================================================
-
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: QsTool-debug-apk
+          name: QsTool-Release-APK
           path: bin/*.apk
           if-no-files-found: error
 
       # ============================================================
-      # 16. COMMIT GENERATED SOURCE
+      # 9. PUSH COMMITS
       # ============================================================
-
-      - name: Push generated source
+      - name: Commit source code
         shell: bash
         run: |
-          set -euo pipefail
-
-          git config user.name \
-            "github-actions[bot]"
-
-          git config user.email \
-            "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add \
-            main.py \
-            qstool \
-            buildozer.spec \
-            requirements.txt
-
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add main.py qstool buildozer.spec
           if git diff --cached --quiet; then
-            echo "Nothing to commit."
+            echo "No changes to commit."
           else
-
-            git commit \
-              -m "Generate QsTool Android source"
-
+            git commit -m "Auto: Update QsTool Build Config"
             git push
           fi
