@@ -11,17 +11,19 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    # Official Kivy Docker container with pre-installed SDK, NDK, and toolchains
-    container:
-      image: kivy/buildozer:latest
-      options: --user root
+    runs-on: ubuntu-22.04
 
     steps:
+      # ============================================================
+      # 1. CHECKOUT
+      # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Prepare Workspace and Scripts
+      # ============================================================
+      # 2. INITIALIZE WORKSPACE & ASSETS
+      # ============================================================
+      - name: Initialize Workspace
         shell: bash
         run: |
           set -euxo pipefail
@@ -31,7 +33,10 @@ jobs:
             echo "filename,size,type" > assets/BGMI.csv
           fi
 
-      - name: Generate pak.py Engine
+      # ============================================================
+      # 3. GENERATE PAK ENGINE (qstool/pak.py)
+      # ============================================================
+      - name: Generate qstool engine
         shell: bash
         run: |
           cat > qstool/__init__.py <<'PY'
@@ -215,7 +220,7 @@ jobs:
                   elif entry.compression == "gzip":
                       output = zlib.decompress(raw, 16 + zlib.MAX_WBITS)
                   else:
-                      raise PakError(f"Compression '{entry.compression}' not supported natively")
+                      raise PakError(f"Compression '{entry.compression}' not supported")
 
                   if len(output) != entry.uncompressed_size:
                       raise PakError("Size mismatch during unpacking")
@@ -223,6 +228,9 @@ jobs:
                   return output
           PY
 
+      # ============================================================
+      # 4. GENERATE MAIN APPLICATION (DARK THEME + CRASH-PROOF)
+      # ============================================================
       - name: Generate main.py Application
         shell: bash
         run: |
@@ -280,7 +288,7 @@ jobs:
                           color: 0.95, 0.95, 0.98, 1
 
                       Label:
-                          text: "Unreal PAK Archive Manager"
+                          text: "Unreal Engine PAK Tool"
                           font_size: "13sp"
                           halign: "left"
                           text_size: self.size
@@ -294,7 +302,7 @@ jobs:
                       spacing: dp(6)
 
                       Label:
-                          text: "STORAGE DIRECTORY"
+                          text: "STORAGE FOLDER"
                           font_size: "12sp"
                           bold: True
                           color: 0.38, 0.70, 0.98, 1
@@ -310,7 +318,7 @@ jobs:
                           text_size: self.size
 
                       Label:
-                          text: "Original/ (input) | Unpack/ (output)"
+                          text: "Original/ (Input) -> Unpack/ (Output)"
                           font_size: "11sp"
                           color: 0.50, 0.52, 0.58, 1
                           halign: "left"
@@ -330,7 +338,7 @@ jobs:
                           root.manager.current = "unpack"
 
                   Button:
-                      text: "GRANT STORAGE ACCESS"
+                      text: "GRANT PERMISSIONS"
                       font_size: "13sp"
                       size_hint_y: None
                       height: dp(46)
@@ -409,7 +417,7 @@ jobs:
                               root.refresh()
 
                   Button:
-                      text: "EXTRACT"
+                      text: "START EXTRACT"
                       font_size: "14sp"
                       bold: True
                       size_hint_y: None
@@ -477,7 +485,7 @@ jobs:
                   original = root / "Original"
 
                   if not original.exists():
-                      self.status = "Click GRANT STORAGE ACCESS first"
+                      self.status = "Folder missing. Click GRANT PERMISSIONS"
                       return
 
                   try:
@@ -494,7 +502,7 @@ jobs:
                           self.status = f"{len(files)} PAK archive(s) ready"
                       else:
                           self.ids.pak_spinner.text = "Choose PAK"
-                          self.status = "Copy .pak into QsTool/Original/"
+                          self.status = "Put .pak into QsTool/Original/"
                   except Exception as e:
                       self.status = f"Permission error: {str(e)}"
 
@@ -599,7 +607,6 @@ jobs:
                       Permission.WRITE_EXTERNAL_STORAGE,
                   ])
 
-                  # Handle Android 11+ (API 30+) All Files Access
                   try:
                       from jnius import autoclass
                       Environment = autoclass("android.os.Environment")
@@ -622,6 +629,9 @@ jobs:
               QsToolApp().run()
           PY
 
+      # ============================================================
+      # 5. BUILDOZER SPECIFICATION
+      # ============================================================
       - name: Generate buildozer.spec
         shell: bash
         run: |
@@ -655,20 +665,24 @@ jobs:
 
           [buildozer]
           log_level = 2
-          warn_on_root = 1
+          warn_on_root = 0
           EOF
 
-      - name: Build Android APK
-        shell: bash
-        env:
-          LANG: C.UTF-8
-          LC_ALL: C.UTF-8
-        run: |
-          buildozer -v android debug
+      # ============================================================
+      # 6. BUILD ANDROID APK (USING BUILDOZER ACTION)
+      # ============================================================
+      - name: Build with Buildozer
+        uses: ArtemSBulgakov/buildozer-action@v1
+        with:
+          buildozer_version: master
+          command: buildozer -v android debug
 
-      - name: Upload Artifact
+      # ============================================================
+      # 7. UPLOAD ARTIFACT
+      # ============================================================
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: QsTool-Clean-APK
+          name: QsTool-Fixed-Release-APK
           path: bin/*.apk
           if-no-files-found: error
