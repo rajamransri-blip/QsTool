@@ -14,15 +14,9 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      # ============================================================
-      # 1. CHECKOUT
-      # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ============================================================
-      # 2. SETUP PYTHON & JAVA RUNTIMES
-      # ============================================================
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -34,24 +28,17 @@ jobs:
           distribution: "temurin"
           java-version: "17"
 
-      # ============================================================
-      # 3. INSTALL OS BUILD TOOLCHAINS
-      # ============================================================
       - name: Install System Dependencies
         shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            git zip unzip pkg-config \
-            autoconf automake libtool zlib1g-dev \
-            libffi-dev libssl-dev cmake
+            git zip unzip pkg-config autoconf automake \
+            libtool zlib1g-dev libffi-dev libssl-dev cmake
 
           pip install --upgrade pip setuptools wheel
           pip install "cython<3.0.0" buildozer
 
-      # ============================================================
-      # 4. INITIALIZE REPO WORKSPACE
-      # ============================================================
       - name: Initialize Workspace
         shell: bash
         run: |
@@ -62,10 +49,7 @@ jobs:
             echo "filename,size,type" > assets/BGMI.csv
           fi
 
-      # ============================================================
-      # 5. GENERATE PAK ENGINE (qstool/pak.py)
-      # ============================================================
-      - name: Generate qstool engine
+      - name: Generate pak.py Engine (Header + Footer Universal Parser)
         shell: bash
         run: |
           cat > qstool/__init__.py <<'PY'
@@ -143,42 +127,52 @@ jobs:
                       raise PakError("File too small to be a valid PAK")
 
                   with self.path.open("rb") as fp:
-                      tail_size = min(file_size, 4096)
+                      # 1. Try reading standard footer (Last 65KB search)
+                      tail_size = min(file_size, 65536)
                       fp.seek(file_size - tail_size)
                       tail = fp.read(tail_size)
                       marker = struct.pack("<I", MAGIC)
                       pos = tail.rfind(marker)
 
-                      if pos < 0:
-                          raise PakError("PAK magic not found in footer")
+                      if pos >= 0:
+                          footer_offset = file_size - tail_size + pos
+                          fp.seek(footer_offset)
+                          magic = struct.unpack("<I", fp.read(4))[0]
+                          self.version = struct.unpack("<I", fp.read(4))[0]
+                          self.index_offset = struct.unpack("<q", fp.read(8))[0]
+                          self.index_size = struct.unpack("<q", fp.read(8))[0]
+                          fp.read(20)  # hash
+                          flag = fp.read(1)
+                          self.encrypted_index = bool(flag and flag[0] != 0)
+                      else:
+                          # 2. Try Header check (Mobile UE Game Patches)
+                          fp.seek(0)
+                          header_magic = struct.unpack("<I", fp.read(4))[0]
+                          if header_magic == MAGIC:
+                              self.version = struct.unpack("<I", fp.read(4))[0]
+                              self.index_offset = struct.unpack("<q", fp.read(8))[0]
+                              self.index_size = struct.unpack("<q", fp.read(8))[0]
+                              fp.read(20)
+                              flag = fp.read(1)
+                              self.encrypted_index = bool(flag and flag[0] != 0)
+                          else:
+                              raise PakError("Not a standard or patch UE PAK (Magic 0x5A6F12E1 missing)")
 
-                      footer = file_size - tail_size + pos
-                      fp.seek(footer)
-
-                      magic = struct.unpack("<I", fp.read(4))[0]
-                      if magic != MAGIC:
-                          raise PakError("Invalid PAK magic header")
-
-                      self.version = struct.unpack("<I", fp.read(4))[0]
-                      self.index_offset = struct.unpack("<q", fp.read(8))[0]
-                      self.index_size = struct.unpack("<q", fp.read(8))[0]
-                      index_hash = fp.read(20)
-
-                      if len(index_hash) != 20:
-                          raise PakError("Corrupted PAK footer")
-
-                      flag = fp.read(1)
-                      self.encrypted_index = bool(flag and flag[0] != 0)
                       if self.encrypted_index:
                           return self
 
                       if self.index_offset < 0 or self.index_size <= 0:
-                          raise PakError("Corrupted index boundary")
+                          raise PakError("Invalid or corrupted PAK index table")
 
                       if self.index_offset + self.index_size > file_size:
-                          raise PakError("PAK index outside file boundaries")
+                          # If relative offset
+                          if self.index_size <= file_size:
+                              fp.seek(file_size - self.index_size)
+                          else:
+                              raise PakError("PAK index points outside file boundary")
+                      else:
+                          fp.seek(self.index_offset)
 
-                      fp.seek(self.index_offset)
                       data = fp.read(self.index_size)
 
                   self.parse_index(data)
@@ -186,11 +180,14 @@ jobs:
 
               def parse_index(self, data):
                   reader = Reader(io.BytesIO(data))
-                  mount = reader.fstring()
-                  count = reader.i32()
+                  try:
+                      mount = reader.fstring()
+                      count = reader.i32()
+                  except Exception:
+                      raise PakError("Corrupted index header or encrypted data")
 
-                  if count < 0 or count > 5_000_000:
-                      raise PakError("Invalid entry count")
+                  if count < 0 or count > 10_000_000:
+                      raise PakError(f"Invalid entry count ({count}) - likely AES encrypted")
 
                   for _ in range(count):
                       relative = reader.fstring().replace("\\", "/").lstrip("/")
@@ -202,8 +199,8 @@ jobs:
 
                       blocks = []
                       block_count = reader.i32()
-                      if block_count < 0 or block_count > 1_000_000:
-                          raise PakError("Corrupted block header")
+                      if block_count < 0 or block_count > 100_000:
+                          raise PakError("Invalid block count in entry")
 
                       for _b in range(block_count):
                           start = reader.i64()
@@ -231,7 +228,7 @@ jobs:
                           chunks = []
                           for start, end in entry.blocks:
                               if end < start:
-                                  raise PakError("Invalid chunk boundary")
+                                  raise PakError("Invalid chunk size")
                               fp.seek(start)
                               chunks.append(fp.read(end - start))
                           raw = b"".join(chunks)
@@ -249,18 +246,15 @@ jobs:
                   elif entry.compression == "gzip":
                       output = zlib.decompress(raw, 16 + zlib.MAX_WBITS)
                   else:
-                      raise PakError(f"Compression '{entry.compression}' not supported natively")
+                      raise PakError(f"Compression '{entry.compression}' not supported")
 
                   if len(output) != entry.uncompressed_size:
-                      raise PakError("Size mismatch during unpacking")
+                      raise PakError("Size mismatch during decompression")
 
                   return output
           PY
 
-      # ============================================================
-      # 6. GENERATE MAIN APPLICATION (DARK THEME + CRASH-PROOF)
-      # ============================================================
-      - name: Generate main.py Application
+      - name: Generate main.py
         shell: bash
         run: |
           cat > main.py <<'PY'
@@ -282,7 +276,7 @@ jobs:
           <DarkCard@BoxLayout>:
               canvas.before:
                   Color:
-                      rgba: 0.12, 0.13, 0.17, 1
+                      rgba: 0.11, 0.12, 0.16, 1
                   RoundedRectangle:
                       pos: self.pos
                       size: self.size
@@ -292,7 +286,7 @@ jobs:
               name: "home"
               canvas.before:
                   Color:
-                      rgba: 0.07, 0.08, 0.10, 1
+                      rgba: 0.05, 0.06, 0.08, 1
                   Rectangle:
                       pos: self.pos
                       size: self.size
@@ -317,7 +311,7 @@ jobs:
                           color: 0.95, 0.95, 0.98, 1
 
                       Label:
-                          text: "Unreal Engine PAK Tool"
+                          text: "Universal Unreal PAK Unpacker"
                           font_size: "13sp"
                           halign: "left"
                           text_size: self.size
@@ -331,7 +325,7 @@ jobs:
                       spacing: dp(6)
 
                       Label:
-                          text: "STORAGE DIRECTORY"
+                          text: "WORKSPACE STORAGE"
                           font_size: "12sp"
                           bold: True
                           color: 0.38, 0.70, 0.98, 1
@@ -347,7 +341,7 @@ jobs:
                           text_size: self.size
 
                       Label:
-                          text: "Original/ (Input) -> Unpack/ (Output)"
+                          text: "Put .pak inside Original/ | Extracted files -> Unpack/"
                           font_size: "11sp"
                           color: 0.50, 0.52, 0.58, 1
                           halign: "left"
@@ -367,7 +361,7 @@ jobs:
                           root.manager.current = "unpack"
 
                   Button:
-                      text: "GRANT PERMISSIONS"
+                      text: "GRANT ALL STORAGE ACCESS"
                       font_size: "13sp"
                       size_hint_y: None
                       height: dp(46)
@@ -381,7 +375,7 @@ jobs:
               name: "unpack"
               canvas.before:
                   Color:
-                      rgba: 0.07, 0.08, 0.10, 1
+                      rgba: 0.05, 0.06, 0.08, 1
                   Rectangle:
                       pos: self.pos
                       size: self.size
@@ -396,7 +390,7 @@ jobs:
                       height: dp(40)
 
                       Label:
-                          text: "PAK Extractor"
+                          text: "PAK Unpack Console"
                           font_size: "20sp"
                           bold: True
                           halign: "left"
@@ -438,7 +432,7 @@ jobs:
                           padding: [dp(10), dp(10)]
 
                       Button:
-                          text: "Refresh"
+                          text: "Scan"
                           size_hint_x: 0.35
                           background_normal: ""
                           background_color: 0.16, 0.18, 0.22, 1
@@ -446,7 +440,7 @@ jobs:
                               root.refresh()
 
                   Button:
-                      text: "START EXTRACT"
+                      text: "START UNPACKING"
                       font_size: "14sp"
                       bold: True
                       size_hint_y: None
@@ -469,7 +463,7 @@ jobs:
                       text: root.terminal
                       readonly: True
                       font_size: "11sp"
-                      background_color: 0.03, 0.04, 0.05, 1
+                      background_color: 0.02, 0.02, 0.03, 1
                       foreground_color: 0.35, 0.88, 0.45, 1
                       padding: [dp(8), dp(8)]
           """
@@ -514,7 +508,7 @@ jobs:
                   original = root / "Original"
 
                   if not original.exists():
-                      self.status = "Folder missing. Click GRANT PERMISSIONS"
+                      self.status = "Folder missing. Click GRANT ALL STORAGE ACCESS"
                       return
 
                   try:
@@ -528,12 +522,12 @@ jobs:
 
                       if files:
                           self.ids.pak_spinner.text = files[0]
-                          self.status = f"{len(files)} PAK archive(s) ready"
+                          self.status = f"{len(files)} PAK archive(s) detected"
                       else:
                           self.ids.pak_spinner.text = "Choose PAK"
-                          self.status = "Put .pak into QsTool/Original/"
+                          self.status = "No .pak files found in Original/"
                   except Exception as e:
-                      self.status = f"Permission error: {str(e)}"
+                      self.status = f"Read error: {str(e)}"
 
               def start_unpack(self):
                   pak_name = self.ids.pak_spinner.text.strip()
@@ -550,7 +544,7 @@ jobs:
                   root = storage_root()
                   pak_path = root / "Original" / pak_name
                   self.terminal = ""
-                  self.status = "Extracting..."
+                  self.status = "Unpacking..."
 
                   thread = threading.Thread(
                       target=self.worker,
@@ -569,7 +563,7 @@ jobs:
                       self.log(f"Version: {reader.version} | Entries: {len(reader.entries):,}")
 
                       if reader.encrypted_index:
-                          raise PakError("Index encrypted. AES decryption key required.")
+                          raise PakError("Index encrypted. AES key required.")
 
                       wanted = []
                       target_norm = target.replace("\\", "/").strip("/").lower()
@@ -582,7 +576,7 @@ jobs:
                                   wanted.append(entry)
 
                       if not wanted:
-                          raise PakError("Target not found in archive.")
+                          raise PakError(f"Target '{target}' not found in PAK.")
 
                       self.log(f"Extracting {len(wanted)} items...")
                       total_bytes = 0
@@ -610,7 +604,7 @@ jobs:
 
                   except Exception as exc:
                       self.log(f"ERROR: {str(exc)}")
-                      Clock.schedule_once(lambda dt: setattr(self, "status", "Failed - check log"))
+                      Clock.schedule_once(lambda dt: setattr(self, "status", "Failed - Check Logs"))
 
 
           class QsToolApp(App):
@@ -630,12 +624,7 @@ jobs:
                   if platform != "android":
                       return
 
-                  from android.permissions import request_permissions, Permission
-                  request_permissions([
-                      Permission.READ_EXTERNAL_STORAGE,
-                      Permission.WRITE_EXTERNAL_STORAGE,
-                  ])
-
+                  # Native Android Java Intent for Android 11+ All Files Access
                   try:
                       from jnius import autoclass
                       Environment = autoclass("android.os.Environment")
@@ -658,10 +647,7 @@ jobs:
               QsToolApp().run()
           PY
 
-      # ============================================================
-      # 7. BUILDOZER SPECIFICATION
-      # ============================================================
-      - name: Generate buildozer.spec
+      - name: Generate buildozer.spec (Fixed Requirements & Stable Toolchain)
         shell: bash
         run: |
           cat > buildozer.spec <<'EOF'
@@ -676,7 +662,9 @@ jobs:
           source.exclude_dirs = .git,.buildozer,bin,build,dist,__pycache__
 
           version = 1.0.0
-          requirements = python3,kivy,android
+
+          # Crucial: Avoid invalid 'android' pip package. Only standard recipes here.
+          requirements = python3,kivy
 
           orientation = portrait
           fullscreen = 0
@@ -694,24 +682,17 @@ jobs:
 
           [buildozer]
           log_level = 2
-          warn_on_root = 0
+          warn_on_root = 1
           EOF
 
-      # ============================================================
-      # 8. BUILD ANDROID APK (NON-ROOT RUNNER EXECUTION)
-      # ============================================================
       - name: Build Android APK
         shell: bash
         env:
           LANG: C.UTF-8
           LC_ALL: C.UTF-8
         run: |
-          # Buildozer asks for root confirmation if stdin is closed; using pipe 'yes' bypasses prompt safely
-          yes | buildozer -v android debug
+          buildozer -v android debug
 
-      # ============================================================
-      # 9. UPLOAD APK ARTIFACT
-      # ============================================================
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
