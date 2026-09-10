@@ -1,6 +1,4 @@
-__version__ = "1.0.0"
-
-import csv
+import os
 import threading
 import time
 from pathlib import Path
@@ -8,63 +6,62 @@ from pathlib import Path
 from kivy.app import App
 from kivy.clock import Clock
 from kivy.lang import Builder
-from kivy.properties import StringProperty
+from kivy.properties import StringProperty, ListProperty
 from kivy.uix.screenmanager import ScreenManager, Screen
+from kivy.utils import platform
 
 from qstool.pak import PakReader, PakError
 
 
-KV = r'''
-ScreenManager:
-    HomeScreen:
-    UnpackScreen:
-
+KV = r"""
 <HomeScreen>:
     name: "home"
-
     BoxLayout:
         orientation: "vertical"
-        padding: dp(18)
-        spacing: dp(12)
+        padding: dp(20)
+        spacing: dp(14)
 
         Label:
             text: "QsTool"
-            font_size: "30sp"
+            font_size: "32sp"
             bold: True
             size_hint_y: None
-            height: dp(55)
+            height: dp(60)
 
         Label:
-            text: "PAK Unpack / Structure Tool"
+            text: "Unreal PAK Tool (BGMI/PUBG)"
+            color: 0.7, 0.7, 0.7, 1
             size_hint_y: None
             height: dp(35)
 
         Button:
-            text: "Unpack"
+            text: "Open PAK Unpacker"
             size_hint_y: None
             height: dp(55)
             on_release:
                 root.manager.current = "unpack"
 
         Label:
-            text: "Storage: /storage/emulated/0/QsTool/"
+            text: "Path: /storage/emulated/0/QsTool/"
+            font_size: "13sp"
+            color: 0.5, 0.8, 0.5, 1
             size_hint_y: None
             height: dp(40)
 
+
 <UnpackScreen>:
     name: "unpack"
-
     BoxLayout:
         orientation: "vertical"
-        padding: dp(12)
-        spacing: dp(8)
+        padding: dp(14)
+        spacing: dp(10)
 
         Label:
-            text: "PAK Unpack"
-            font_size: "24sp"
+            text: "PAK Unpack Console"
+            font_size: "22sp"
             bold: True
             size_hint_y: None
-            height: dp(42)
+            height: dp(40)
 
         Spinner:
             id: pak_spinner
@@ -74,7 +71,7 @@ ScreenManager:
             height: dp(48)
 
         Button:
-            text: "Detect / Refresh PAK"
+            text: "🔄 Scan / Refresh PAKs"
             size_hint_y: None
             height: dp(44)
             on_release:
@@ -82,61 +79,50 @@ ScreenManager:
 
         TextInput:
             id: target
-            hint_text: "Target file name or ALL"
+            text: "ALL"
+            hint_text: "Target filename or ALL"
             multiline: False
             size_hint_y: None
             height: dp(48)
 
         Button:
-            text: "Unpacking Options"
+            text: "⚡ Start Unpacking"
+            bold: True
             size_hint_y: None
-            height: dp(52)
+            height: dp(50)
             on_release:
                 root.start_unpack()
 
         Label:
             text: root.status
-            text_size: self.width, None
-            halign: "left"
-            valign: "top"
+            size_hint_y: None
+            height: dp(35)
+            color: 1, 0.8, 0.2, 1
 
         TextInput:
             text: root.terminal
             readonly: True
-            size_hint_y: 1
+            font_size: "12sp"
 
         Button:
-            text: "Back"
+            text: "Back to Home"
             size_hint_y: None
             height: dp(44)
             on_release:
                 root.manager.current = "home"
-'''
+"""
 
 
 def storage_root():
-    android_storage = Path("/storage/emulated/0")
-
-    if android_storage.exists():
-        return android_storage / "QsTool"
-
+    if platform == "android":
+        return Path("/storage/emulated/0/QsTool")
     return Path.home() / "QsTool"
 
 
-def ensure_dirs():
+def make_dirs():
     root = storage_root()
-
-    for name in (
-        "Original",
-        "Editor",
-        "Unpack",
-        "Structure",
-    ):
-        (root / name).mkdir(
-            parents=True,
-            exist_ok=True
-        )
-
+    for folder in ("Original", "Editor", "Unpack", "Structure"):
+        (root / folder).mkdir(parents=True, exist_ok=True)
     return root
 
 
@@ -145,296 +131,134 @@ class HomeScreen(Screen):
 
 
 class UnpackScreen(Screen):
-
-    pak_values = []
-    status = StringProperty("")
+    pak_values = ListProperty([])
+    status = StringProperty("Ready")
     terminal = StringProperty("")
 
     def on_pre_enter(self):
-        ensure_dirs()
+        make_dirs()
         self.refresh()
 
-    def log(self, text):
+    def log(self, message):
         def update(_dt):
-            self.terminal += text + "\n"
-
+            self.terminal += message + "\n"
         Clock.schedule_once(update)
 
     def refresh(self):
-        root = ensure_dirs()
-
+        root = make_dirs()
         original = root / "Original"
-
         files = sorted(
-            [
-                p.name
-                for p in original.iterdir()
-                if p.is_file()
-                and p.suffix.lower() == ".pak"
-            ]
+            p.name
+            for p in original.iterdir()
+            if p.is_file() and p.suffix.lower() == ".pak"
         )
-
         self.pak_values = files
         self.ids.pak_spinner.values = files
 
         if files:
             self.ids.pak_spinner.text = files[0]
-            self.status = (
-                f"Detected {len(files)} PAK file(s)"
-            )
+            self.status = f"{len(files)} PAK(s) found in Original/"
         else:
             self.ids.pak_spinner.text = "Choose PAK"
-            self.status = (
-                "Put .pak files into:\n"
-                f"{original}"
-            )
+            self.status = "Copy .pak to /sdcard/QsTool/Original/"
 
     def start_unpack(self):
         pak_name = self.ids.pak_spinner.text.strip()
         target = self.ids.target.text.strip()
 
-        if (
-            not pak_name
-            or pak_name == "Choose PAK"
-        ):
-            self.status = "Choose a PAK first."
+        if not pak_name or pak_name == "Choose PAK":
+            self.status = "Error: Please select a PAK file"
             return
 
         if not target:
-            self.status = (
-                "Enter target filename or ALL."
-            )
+            self.status = "Error: Specify file or ALL"
             return
 
-        root = ensure_dirs()
-
-        pak_path = (
-            root
-            / "Original"
-            / pak_name
-        )
-
-        unpack_dir = root / "Unpack"
-        structure_dir = root / "Structure"
-
+        root = make_dirs()
+        pak_path = root / "Original" / pak_name
         self.terminal = ""
-        self.status = "Starting..."
+        self.status = "Unpacking started..."
 
-        threading.Thread(
+        thread = threading.Thread(
             target=self.worker,
-            args=(
-                pak_path,
-                unpack_dir,
-                structure_dir,
-                target,
-            ),
+            args=(pak_path, root / "Unpack", root / "Structure", target),
             daemon=True,
-        ).start()
+        )
+        thread.start()
 
-    def worker(
-        self,
-        pak_path,
-        unpack_dir,
-        structure_dir,
-        target,
-    ):
+    def worker(self, pak_path, unpack_dir, structure_dir, target):
         started = time.perf_counter()
-
         try:
-            self.log(
-                f"PAK: {pak_path.name}"
-            )
-
-            self.log(
-                f"Target: {target}"
-            )
-
-            self.log(
-                "Reading PAK index..."
-            )
-
-            reader = PakReader(
-                pak_path
-            )
-
+            self.log(f"Loading: {pak_path.name}")
+            reader = PakReader(pak_path)
             reader.open()
 
-            self.log(
-                f"Version: {reader.version}"
-            )
-
-            self.log(
-                f"Entries: {len(reader.entries):,}"
-            )
-
-            self.log(
-                f"Encrypted index: "
-                f"{reader.encrypted_index}"
-            )
+            self.log(f"PAK Version: {reader.version}")
+            self.log(f"Total Entries: {len(reader.entries):,}")
 
             if reader.encrypted_index:
-                raise PakError(
-                    "Encrypted PAK index. "
-                    "An authorized key is required."
-                )
+                raise PakError("Encrypted PAK index. Authorized AES key needed.")
 
             wanted = []
-
-            target_norm = (
-                target
-                .replace("\\", "/")
-                .strip("/")
-                .lower()
-            )
+            target_norm = target.replace("\\", "/").strip("/").lower()
 
             if target.upper() == "ALL":
-                wanted = list(
-                    reader.entries.values()
-                )
-
+                wanted = list(reader.entries.values())
             else:
-                for entry in (
-                    reader.entries.values()
-                ):
-                    filename = (
-                        Path(entry.path)
-                        .name
-                        .lower()
-                    )
-
-                    if filename == target_norm:
+                for entry in reader.entries.values():
+                    if Path(entry.path).name.lower() == target_norm:
                         wanted.append(entry)
 
-                if not wanted:
-                    for entry in (
-                        reader.entries.values()
-                    ):
-                        if (
-                            entry.path.lower()
-                            == target_norm
-                        ):
-                            wanted.append(entry)
-
             if not wanted:
-                raise PakError(
-                    "Target file not found "
-                    "in PAK index."
-                )
+                raise PakError("Target file not found in archive.")
 
-            self.log(
-                f"Matched: {len(wanted):,}"
-            )
-
+            self.log(f"Extracting: {len(wanted)} files...")
             total_bytes = 0
 
-            for index, entry in enumerate(
-                wanted,
-                start=1,
-            ):
-                output = (
-                    unpack_dir
-                    / Path(entry.path)
-                )
+            for idx, entry in enumerate(wanted, 1):
+                clean_subpath = entry.path.lstrip("/\\")
+                output = unpack_dir / clean_subpath
+                output.parent.mkdir(parents=True, exist_ok=True)
 
-                output.parent.mkdir(
-                    parents=True,
-                    exist_ok=True,
-                )
-
-                one_started = (
-                    time.perf_counter()
-                )
-
-                data = (
-                    reader.read_entry(entry)
-                )
-
+                data = reader.read_entry(entry)
                 output.write_bytes(data)
 
-                size = len(data)
+                total_bytes += len(data)
+                if idx % 50 == 0 or idx == len(wanted):
+                    self.log(f"[{idx}/{len(wanted)}] {clean_subpath} ({len(data):,} B)")
 
-                total_bytes += size
+            # Write Structure manifest
+            report = structure_dir / f"{pak_path.stem}_structure.txt"
+            with report.open("w", encoding="utf-8") as fp:
+                for entry in reader.entries.values():
+                    fp.write(f"{entry.path}\t{entry.uncompressed_size}\t{entry.compression}\n")
 
-                elapsed = (
-                    time.perf_counter()
-                    - one_started
-                )
-
-                self.log(
-                    f"[{index}/"
-                    f"{len(wanted)}] "
-                    f"{entry.path} | "
-                    f"{size:,} bytes | "
-                    f"{elapsed:.2f}s"
-                )
-
-            report = (
-                structure_dir
-                / f"{pak_path.stem}"
-                "_structure.txt"
-            )
-
-            with report.open(
-                "w",
-                encoding="utf-8",
-            ) as fp:
-
-                for entry in (
-                    reader.entries.values()
-                ):
-                    fp.write(
-                        f"{entry.path}\t"
-                        f"{entry.uncompressed_size}\t"
-                        f"{entry.compression}\n"
-                    )
-
-            total_time = (
-                time.perf_counter()
-                - started
-            )
-
-            self.log(
-                f"Total: "
-                f"{total_bytes:,} bytes"
-            )
-
-            self.log(
-                f"Time: "
-                f"{total_time:.2f}s"
-            )
-
-            Clock.schedule_once(
-                lambda dt: setattr(
-                    self,
-                    "status",
-                    "Unpacking completed.",
-                )
-            )
+            elapsed = time.perf_counter() - started
+            self.log(f"Done! Extracted {total_bytes:,} bytes in {elapsed:.2f}s")
+            Clock.schedule_once(lambda dt: setattr(self, "status", "Extraction Completed!"))
 
         except Exception as exc:
-            self.log(
-                "ERROR: "
-                + str(exc)
-            )
-
-            Clock.schedule_once(
-                lambda dt: setattr(
-                    self,
-                    "status",
-                    "Unpacking failed. "
-                    "See terminal.",
-                )
-            )
+            self.log(f"ERROR: {str(exc)}")
+            Clock.schedule_once(lambda dt: setattr(self, "status", "Failed - Check Logs"))
 
 
 class QsToolApp(App):
-
     def build(self):
-        ensure_dirs()
-
+        self.request_android_permissions()
+        make_dirs()
         Builder.load_string(KV)
+        sm = ScreenManager()
+        sm.add_widget(HomeScreen(name="home"))
+        sm.add_widget(UnpackScreen(name="unpack"))
+        return sm
 
-        return ScreenManager()
+    def request_android_permissions(self):
+        if platform == "android":
+            from android.permissions import request_permissions, Permission
+            request_permissions([
+                Permission.READ_EXTERNAL_STORAGE,
+                Permission.WRITE_EXTERNAL_STORAGE,
+            ])
 
 
 if __name__ == "__main__":
