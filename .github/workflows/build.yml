@@ -9,440 +9,29 @@ on:
 permissions:
   contents: write
 
-env:
-  APP_NAME: QsTool
-  PACKAGE_NAME: qstool
-  PACKAGE_DOMAIN: org.qstool
-
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
+    # Official Kivy Docker container with pre-installed SDK, NDK, and toolchains
+    container:
+      image: kivy/buildozer:latest
+      options: --user root
 
     steps:
-      # ============================================================
-      # 1. CHECKOUT
-      # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      # ============================================================
-      # 2. CLEAN WORKSPACE
-      # ============================================================
-      - name: Clean workspace
+      - name: Prepare Workspace and Scripts
         shell: bash
         run: |
           set -euxo pipefail
-          rm -rf .buildozer bin build dist qstool main.py buildozer.spec
-          mkdir -p qstool assets
+          mkdir -p assets qstool
 
           if [ ! -f assets/BGMI.csv ]; then
             echo "filename,size,type" > assets/BGMI.csv
           fi
 
-      # ============================================================
-      # 3. GENERATE MAIN PYTHON APPLICATION (DARK MATERIAL 3 UI)
-      # ============================================================
-      - name: Generate main.py
-        shell: bash
-        run: |
-          cat > main.py <<'PY'
-          import os
-          import threading
-          import time
-          from pathlib import Path
-
-          from kivy.app import App
-          from kivy.clock import Clock
-          from kivy.lang import Builder
-          from kivy.properties import StringProperty, ListProperty
-          from kivy.uix.screenmanager import ScreenManager, Screen
-          from kivy.utils import platform
-
-          from qstool.pak import PakReader, PakError
-
-
-          KV = r"""
-          #:import Window kivy.core.window.Window
-
-          <DarkCard@BoxLayout>:
-              canvas.before:
-                  Color:
-                      rgba: 0.11, 0.12, 0.15, 1
-                  RoundedRectangle:
-                      pos: self.pos
-                      size: self.size
-                      radius: [14, 14, 14, 14]
-
-          <HomeScreen>:
-              name: "home"
-              canvas.before:
-                  Color:
-                      rgba: 0.05, 0.05, 0.07, 1
-                  Rectangle:
-                      pos: self.pos
-                      size: self.size
-
-              BoxLayout:
-                  orientation: "vertical"
-                  padding: [dp(22), dp(36), dp(22), dp(24)]
-                  spacing: dp(18)
-
-                  # Header Section
-                  BoxLayout:
-                      orientation: "vertical"
-                      size_hint_y: None
-                      height: dp(80)
-                      spacing: dp(4)
-
-                      Label:
-                          text: "QsTool"
-                          font_size: "32sp"
-                          bold: True
-                          halign: "left"
-                          text_size: self.size
-                          color: 0.94, 0.94, 0.96, 1
-
-                      Label:
-                          text: "Unreal PAK Archive Engine"
-                          font_size: "14sp"
-                          halign: "left"
-                          text_size: self.size
-                          color: 0.55, 0.58, 0.65, 1
-
-                  # Info Card
-                  DarkCard:
-                      orientation: "vertical"
-                      size_hint_y: None
-                      height: dp(115)
-                      padding: dp(16)
-                      spacing: dp(6)
-
-                      Label:
-                          text: "Storage Workspace"
-                          font_size: "13sp"
-                          bold: True
-                          color: 0.38, 0.70, 0.96, 1
-                          halign: "left"
-                          text_size: self.size
-
-                      Label:
-                          text: "/storage/emulated/0/QsTool/"
-                          font_size: "12sp"
-                          color: 0.85, 0.85, 0.88, 1
-                          halign: "left"
-                          text_size: self.size
-
-                      Label:
-                          text: "Put .pak files inside Original/ directory"
-                          font_size: "11sp"
-                          color: 0.50, 0.52, 0.58, 1
-                          halign: "left"
-                          text_size: self.size
-
-                  Widget:
-
-                  # Action Buttons
-                  Button:
-                      text: "OPEN UNPACKER"
-                      font_size: "15sp"
-                      bold: True
-                      size_hint_y: None
-                      height: dp(54)
-                      background_normal: ""
-                      background_color: 0.22, 0.47, 0.98, 1
-                      on_release:
-                          root.manager.current = "unpack"
-
-                  Button:
-                      text: "RE-CHECK PERMISSIONS"
-                      font_size: "13sp"
-                      size_hint_y: None
-                      height: dp(46)
-                      background_normal: ""
-                      background_color: 0.16, 0.18, 0.22, 1
-                      on_release:
-                          app.request_android_permissions()
-
-
-          <UnpackScreen>:
-              name: "unpack"
-              canvas.before:
-                  Color:
-                      rgba: 0.05, 0.05, 0.07, 1
-                  Rectangle:
-                      pos: self.pos
-                      size: self.size
-
-              BoxLayout:
-                  orientation: "vertical"
-                  padding: [dp(16), dp(24), dp(16), dp(16)]
-                  spacing: dp(10)
-
-                  # Top Bar
-                  BoxLayout:
-                      size_hint_y: None
-                      height: dp(42)
-
-                      Label:
-                          text: "PAK Unpack Console"
-                          font_size: "20sp"
-                          bold: True
-                          halign: "left"
-                          text_size: self.size
-                          color: 0.94, 0.94, 0.96, 1
-
-                      Button:
-                          text: "Back"
-                          size_hint_x: None
-                          width: dp(70)
-                          background_normal: ""
-                          background_color: 0.16, 0.18, 0.22, 1
-                          on_release:
-                              root.manager.current = "home"
-
-                  # Selection Area
-                  Spinner:
-                      id: pak_spinner
-                      text: "Choose PAK"
-                      values: root.pak_values
-                      size_hint_y: None
-                      height: dp(46)
-                      background_normal: ""
-                      background_color: 0.14, 0.16, 0.20, 1
-                      color: 0.90, 0.90, 0.92, 1
-
-                  BoxLayout:
-                      size_hint_y: None
-                      height: dp(44)
-                      spacing: dp(8)
-
-                      TextInput:
-                          id: target
-                          text: "ALL"
-                          hint_text: "Target filename or ALL"
-                          multiline: False
-                          background_color: 0.12, 0.13, 0.16, 1
-                          foreground_color: 1, 1, 1, 1
-                          cursor_color: 0.38, 0.70, 0.96, 1
-                          padding: [dp(12), dp(10)]
-
-                      Button:
-                          text: "Scan"
-                          size_hint_x: 0.32
-                          background_normal: ""
-                          background_color: 0.16, 0.18, 0.22, 1
-                          on_release:
-                              root.refresh()
-
-                  Button:
-                      text: "EXTRACT TARGET / ALL"
-                      font_size: "14sp"
-                      bold: True
-                      size_hint_y: None
-                      height: dp(48)
-                      background_normal: ""
-                      background_color: 0.12, 0.65, 0.38, 1
-                      on_release:
-                          root.start_unpack()
-
-                  # Status Output
-                  Label:
-                      text: root.status
-                      size_hint_y: None
-                      height: dp(26)
-                      font_size: "12sp"
-                      color: 0.98, 0.76, 0.18, 1
-                      halign: "left"
-                      text_size: self.size
-
-                  # Terminal Emulator Box
-                  TextInput:
-                      text: root.terminal
-                      readonly: True
-                      font_size: "11sp"
-                      font_name: "Roboto"
-                      background_color: 0.02, 0.02, 0.03, 1
-                      foreground_color: 0.35, 0.88, 0.45, 1
-                      padding: [dp(10), dp(10)]
-          """
-
-
-          def storage_root():
-              if platform == "android":
-                  return Path("/storage/emulated/0/QsTool")
-              return Path.home() / "QsTool"
-
-
-          def make_dirs():
-              try:
-                  root = storage_root()
-                  for folder in ("Original", "Editor", "Unpack", "Structure"):
-                      (root / folder).mkdir(parents=True, exist_ok=True)
-                  return root
-              except Exception:
-                  return Path.home()
-
-
-          class HomeScreen(Screen):
-              pass
-
-
-          class UnpackScreen(Screen):
-              pak_values = ListProperty([])
-              status = StringProperty("Ready")
-              terminal = StringProperty("")
-
-              def on_enter(self):
-                  make_dirs()
-                  self.refresh()
-
-              def log(self, message):
-                  def update(_dt):
-                      self.terminal += message + "\n"
-                  Clock.schedule_once(update)
-
-              def refresh(self):
-                  root = storage_root()
-                  original = root / "Original"
-
-                  if not original.exists():
-                      self.status = "Folder missing, click RE-CHECK PERMISSIONS"
-                      return
-
-                  try:
-                      files = sorted(
-                          p.name
-                          for p in original.iterdir()
-                          if p.is_file() and p.suffix.lower() == ".pak"
-                      )
-                      self.pak_values = files
-                      self.ids.pak_spinner.values = files
-
-                      if files:
-                          self.ids.pak_spinner.text = files[0]
-                          self.status = f"{len(files)} PAK(s) found"
-                      else:
-                          self.ids.pak_spinner.text = "Choose PAK"
-                          self.status = "No .pak in Original/ folder"
-                  except Exception as e:
-                      self.status = f"Access Error: {str(e)}"
-
-              def start_unpack(self):
-                  pak_name = self.ids.pak_spinner.text.strip()
-                  target = self.ids.target.text.strip()
-
-                  if not pak_name or pak_name == "Choose PAK":
-                      self.status = "Error: Select a PAK file first"
-                      return
-
-                  if not target:
-                      self.status = "Error: Enter filename or ALL"
-                      return
-
-                  root = storage_root()
-                  pak_path = root / "Original" / pak_name
-
-                  self.terminal = ""
-                  self.status = "Unpacking started..."
-
-                  thread = threading.Thread(
-                      target=self.worker,
-                      args=(pak_path, root / "Unpack", root / "Structure", target),
-                      daemon=True,
-                  )
-                  thread.start()
-
-              def worker(self, pak_path, unpack_dir, structure_dir, target):
-                  started = time.perf_counter()
-                  try:
-                      self.log(f"Loading: {pak_path.name}")
-                      reader = PakReader(pak_path)
-                      reader.open()
-
-                      self.log(f"PAK Version: {reader.version}")
-                      self.log(f"Total Entries: {len(reader.entries):,}")
-
-                      if reader.encrypted_index:
-                          raise PakError("Encrypted PAK index. Authorized AES key needed.")
-
-                      wanted = []
-                      target_norm = target.replace("\\", "/").strip("/").lower()
-
-                      if target.upper() == "ALL":
-                          wanted = list(reader.entries.values())
-                      else:
-                          for entry in reader.entries.values():
-                              if Path(entry.path).name.lower() == target_norm:
-                                  wanted.append(entry)
-
-                      if not wanted:
-                          raise PakError("Target file not found in archive.")
-
-                      self.log(f"Unpacking {len(wanted)} files...")
-                      total_bytes = 0
-
-                      for idx, entry in enumerate(wanted, 1):
-                          clean_subpath = entry.path.lstrip("/\\")
-                          output = unpack_dir / clean_subpath
-                          output.parent.mkdir(parents=True, exist_ok=True)
-
-                          data = reader.read_entry(entry)
-                          output.write_bytes(data)
-
-                          total_bytes += len(data)
-                          if idx % 25 == 0 or idx == len(wanted):
-                              self.log(f"[{idx}/{len(wanted)}] {clean_subpath} ({len(data):,} B)")
-
-                      report = structure_dir / f"{pak_path.stem}_structure.txt"
-                      with report.open("w", encoding="utf-8") as fp:
-                          for entry in reader.entries.values():
-                              fp.write(f"{entry.path}\t{entry.uncompressed_size}\t{entry.compression}\n")
-
-                      elapsed = time.perf_counter() - started
-                      self.log(f"Done! {total_bytes:,} bytes in {elapsed:.2f}s")
-                      Clock.schedule_once(lambda dt: setattr(self, "status", "Completed!"))
-
-                  except Exception as exc:
-                      self.log(f"ERROR: {str(exc)}")
-                      Clock.schedule_once(lambda dt: setattr(self, "status", "Failed - check log"))
-
-
-          class QsToolApp(App):
-              def build(self):
-                  Builder.load_string(KV)
-                  sm = ScreenManager()
-                  sm.add_widget(HomeScreen(name="home"))
-                  sm.add_widget(UnpackScreen(name="unpack"))
-
-                  Clock.schedule_once(lambda dt: self.init_app(), 0.5)
-                  return sm
-
-              def init_app(self):
-                  self.request_android_permissions()
-                  make_dirs()
-
-              def request_android_permissions(self):
-                  if platform == "android":
-                      try:
-                          from android.permissions import request_permissions, Permission
-                          request_permissions([
-                              Permission.READ_EXTERNAL_STORAGE,
-                              Permission.WRITE_EXTERNAL_STORAGE,
-                          ])
-                      except Exception:
-                          pass
-
-
-          if __name__ == "__main__":
-              QsToolApp().run()
-          PY
-
-      # ============================================================
-      # 4. PAK ENGINE
-      # ============================================================
-      - name: Generate qstool engine
+      - name: Generate pak.py Engine
         shell: bash
         run: |
           cat > qstool/__init__.py <<'PY'
@@ -553,7 +142,7 @@ jobs:
                           raise PakError("Corrupted index boundary")
 
                       if self.index_offset + self.index_size > file_size:
-                          raise PakError("PAK index points outside file range")
+                          raise PakError("PAK index outside file boundaries")
 
                       fp.seek(self.index_offset)
                       data = fp.read(self.index_size)
@@ -566,8 +155,8 @@ jobs:
                   mount = reader.fstring()
                   count = reader.i32()
 
-                  if count < 0 or count > 10_000_000:
-                      raise PakError("Invalid entry count in index")
+                  if count < 0 or count > 5_000_000:
+                      raise PakError("Invalid entry count")
 
                   for _ in range(count):
                       relative = reader.fstring().replace("\\", "/").lstrip("/")
@@ -634,9 +223,405 @@ jobs:
                   return output
           PY
 
-      # ============================================================
-      # 5. BUILDOZER SPECIFICATION
-      # ============================================================
+      - name: Generate main.py Application
+        shell: bash
+        run: |
+          cat > main.py <<'PY'
+          import os
+          import threading
+          import time
+          from pathlib import Path
+
+          from kivy.app import App
+          from kivy.clock import Clock
+          from kivy.lang import Builder
+          from kivy.properties import StringProperty, ListProperty
+          from kivy.uix.screenmanager import ScreenManager, Screen
+          from kivy.utils import platform
+
+          from qstool.pak import PakReader, PakError
+
+          KV = r"""
+          <DarkCard@BoxLayout>:
+              canvas.before:
+                  Color:
+                      rgba: 0.12, 0.13, 0.17, 1
+                  RoundedRectangle:
+                      pos: self.pos
+                      size: self.size
+                      radius: [12, 12, 12, 12]
+
+          <HomeScreen>:
+              name: "home"
+              canvas.before:
+                  Color:
+                      rgba: 0.07, 0.08, 0.10, 1
+                  Rectangle:
+                      pos: self.pos
+                      size: self.size
+
+              BoxLayout:
+                  orientation: "vertical"
+                  padding: [dp(20), dp(32), dp(20), dp(20)]
+                  spacing: dp(16)
+
+                  BoxLayout:
+                      orientation: "vertical"
+                      size_hint_y: None
+                      height: dp(75)
+                      spacing: dp(2)
+
+                      Label:
+                          text: "QsTool Pro"
+                          font_size: "30sp"
+                          bold: True
+                          halign: "left"
+                          text_size: self.size
+                          color: 0.95, 0.95, 0.98, 1
+
+                      Label:
+                          text: "Unreal PAK Archive Manager"
+                          font_size: "13sp"
+                          halign: "left"
+                          text_size: self.size
+                          color: 0.55, 0.58, 0.65, 1
+
+                  DarkCard:
+                      orientation: "vertical"
+                      size_hint_y: None
+                      height: dp(120)
+                      padding: dp(14)
+                      spacing: dp(6)
+
+                      Label:
+                          text: "STORAGE DIRECTORY"
+                          font_size: "12sp"
+                          bold: True
+                          color: 0.38, 0.70, 0.98, 1
+                          halign: "left"
+                          text_size: self.size
+
+                      Label:
+                          text: "/storage/emulated/0/QsTool/"
+                          font_size: "13sp"
+                          bold: True
+                          color: 0.88, 0.88, 0.90, 1
+                          halign: "left"
+                          text_size: self.size
+
+                      Label:
+                          text: "Original/ (input) | Unpack/ (output)"
+                          font_size: "11sp"
+                          color: 0.50, 0.52, 0.58, 1
+                          halign: "left"
+                          text_size: self.size
+
+                  Widget:
+
+                  Button:
+                      text: "OPEN UNPACK CONSOLE"
+                      font_size: "14sp"
+                      bold: True
+                      size_hint_y: None
+                      height: dp(52)
+                      background_normal: ""
+                      background_color: 0.22, 0.47, 0.98, 1
+                      on_release:
+                          root.manager.current = "unpack"
+
+                  Button:
+                      text: "GRANT STORAGE ACCESS"
+                      font_size: "13sp"
+                      size_hint_y: None
+                      height: dp(46)
+                      background_normal: ""
+                      background_color: 0.16, 0.18, 0.22, 1
+                      on_release:
+                          app.check_and_request_permissions()
+
+
+          <UnpackScreen>:
+              name: "unpack"
+              canvas.before:
+                  Color:
+                      rgba: 0.07, 0.08, 0.10, 1
+                  Rectangle:
+                      pos: self.pos
+                      size: self.size
+
+              BoxLayout:
+                  orientation: "vertical"
+                  padding: [dp(16), dp(20), dp(16), dp(16)]
+                  spacing: dp(10)
+
+                  BoxLayout:
+                      size_hint_y: None
+                      height: dp(40)
+
+                      Label:
+                          text: "PAK Extractor"
+                          font_size: "20sp"
+                          bold: True
+                          halign: "left"
+                          text_size: self.size
+                          color: 0.95, 0.95, 0.98, 1
+
+                      Button:
+                          text: "Back"
+                          size_hint_x: None
+                          width: dp(65)
+                          background_normal: ""
+                          background_color: 0.16, 0.18, 0.22, 1
+                          on_release:
+                              root.manager.current = "home"
+
+                  Spinner:
+                      id: pak_spinner
+                      text: "Choose PAK"
+                      values: root.pak_values
+                      size_hint_y: None
+                      height: dp(46)
+                      background_normal: ""
+                      background_color: 0.13, 0.15, 0.19, 1
+                      color: 0.92, 0.92, 0.95, 1
+
+                  BoxLayout:
+                      size_hint_y: None
+                      height: dp(44)
+                      spacing: dp(8)
+
+                      TextInput:
+                          id: target
+                          text: "ALL"
+                          hint_text: "Filename or ALL"
+                          multiline: False
+                          background_color: 0.13, 0.14, 0.17, 1
+                          foreground_color: 1, 1, 1, 1
+                          cursor_color: 0.38, 0.70, 0.98, 1
+                          padding: [dp(10), dp(10)]
+
+                      Button:
+                          text: "Refresh"
+                          size_hint_x: 0.35
+                          background_normal: ""
+                          background_color: 0.16, 0.18, 0.22, 1
+                          on_release:
+                              root.refresh()
+
+                  Button:
+                      text: "EXTRACT"
+                      font_size: "14sp"
+                      bold: True
+                      size_hint_y: None
+                      height: dp(48)
+                      background_normal: ""
+                      background_color: 0.12, 0.65, 0.38, 1
+                      on_release:
+                          root.start_unpack()
+
+                  Label:
+                      text: root.status
+                      size_hint_y: None
+                      height: dp(24)
+                      font_size: "12sp"
+                      color: 0.98, 0.76, 0.18, 1
+                      halign: "left"
+                      text_size: self.size
+
+                  TextInput:
+                      text: root.terminal
+                      readonly: True
+                      font_size: "11sp"
+                      background_color: 0.03, 0.04, 0.05, 1
+                      foreground_color: 0.35, 0.88, 0.45, 1
+                      padding: [dp(8), dp(8)]
+          """
+
+
+          def storage_root():
+              if platform == "android":
+                  return Path("/storage/emulated/0/QsTool")
+              return Path.home() / "QsTool"
+
+
+          def make_dirs():
+              try:
+                  root = storage_root()
+                  for folder in ("Original", "Editor", "Unpack", "Structure"):
+                      (root / folder).mkdir(parents=True, exist_ok=True)
+                  return root
+              except Exception:
+                  return Path.home()
+
+
+          class HomeScreen(Screen):
+              pass
+
+
+          class UnpackScreen(Screen):
+              pak_values = ListProperty([])
+              status = StringProperty("Ready")
+              terminal = StringProperty("")
+
+              def on_enter(self):
+                  make_dirs()
+                  self.refresh()
+
+              def log(self, message):
+                  def update(_dt):
+                      self.terminal += message + "\n"
+                  Clock.schedule_once(update)
+
+              def refresh(self):
+                  root = storage_root()
+                  original = root / "Original"
+
+                  if not original.exists():
+                      self.status = "Click GRANT STORAGE ACCESS first"
+                      return
+
+                  try:
+                      files = sorted(
+                          p.name
+                          for p in original.iterdir()
+                          if p.is_file() and p.suffix.lower() == ".pak"
+                      )
+                      self.pak_values = files
+                      self.ids.pak_spinner.values = files
+
+                      if files:
+                          self.ids.pak_spinner.text = files[0]
+                          self.status = f"{len(files)} PAK archive(s) ready"
+                      else:
+                          self.ids.pak_spinner.text = "Choose PAK"
+                          self.status = "Copy .pak into QsTool/Original/"
+                  except Exception as e:
+                      self.status = f"Permission error: {str(e)}"
+
+              def start_unpack(self):
+                  pak_name = self.ids.pak_spinner.text.strip()
+                  target = self.ids.target.text.strip()
+
+                  if not pak_name or pak_name == "Choose PAK":
+                      self.status = "Error: Select a PAK file"
+                      return
+
+                  if not target:
+                      self.status = "Error: Target cannot be empty"
+                      return
+
+                  root = storage_root()
+                  pak_path = root / "Original" / pak_name
+                  self.terminal = ""
+                  self.status = "Extracting..."
+
+                  thread = threading.Thread(
+                      target=self.worker,
+                      args=(pak_path, root / "Unpack", root / "Structure", target),
+                      daemon=True,
+                  )
+                  thread.start()
+
+              def worker(self, pak_path, unpack_dir, structure_dir, target):
+                  started = time.perf_counter()
+                  try:
+                      self.log(f"Reading: {pak_path.name}")
+                      reader = PakReader(pak_path)
+                      reader.open()
+
+                      self.log(f"Version: {reader.version} | Entries: {len(reader.entries):,}")
+
+                      if reader.encrypted_index:
+                          raise PakError("Index encrypted. AES decryption key required.")
+
+                      wanted = []
+                      target_norm = target.replace("\\", "/").strip("/").lower()
+
+                      if target.upper() == "ALL":
+                          wanted = list(reader.entries.values())
+                      else:
+                          for entry in reader.entries.values():
+                              if Path(entry.path).name.lower() == target_norm:
+                                  wanted.append(entry)
+
+                      if not wanted:
+                          raise PakError("Target not found in archive.")
+
+                      self.log(f"Extracting {len(wanted)} items...")
+                      total_bytes = 0
+
+                      for idx, entry in enumerate(wanted, 1):
+                          clean_subpath = entry.path.lstrip("/\\")
+                          output = unpack_dir / clean_subpath
+                          output.parent.mkdir(parents=True, exist_ok=True)
+
+                          data = reader.read_entry(entry)
+                          output.write_bytes(data)
+
+                          total_bytes += len(data)
+                          if idx % 50 == 0 or idx == len(wanted):
+                              self.log(f"[{idx}/{len(wanted)}] {clean_subpath} ({len(data):,} B)")
+
+                      report = structure_dir / f"{pak_path.stem}_structure.txt"
+                      with report.open("w", encoding="utf-8") as fp:
+                          for entry in reader.entries.values():
+                              fp.write(f"{entry.path}\t{entry.uncompressed_size}\t{entry.compression}\n")
+
+                      elapsed = time.perf_counter() - started
+                      self.log(f"Finished! {total_bytes:,} bytes in {elapsed:.2f}s")
+                      Clock.schedule_once(lambda dt: setattr(self, "status", "Completed!"))
+
+                  except Exception as exc:
+                      self.log(f"ERROR: {str(exc)}")
+                      Clock.schedule_once(lambda dt: setattr(self, "status", "Failed - check log"))
+
+
+          class QsToolApp(App):
+              def build(self):
+                  Builder.load_string(KV)
+                  sm = ScreenManager()
+                  sm.add_widget(HomeScreen(name="home"))
+                  sm.add_widget(UnpackScreen(name="unpack"))
+                  Clock.schedule_once(lambda dt: self.init_app(), 0.3)
+                  return sm
+
+              def init_app(self):
+                  self.check_and_request_permissions()
+                  make_dirs()
+
+              def check_and_request_permissions(self):
+                  if platform != "android":
+                      return
+
+                  from android.permissions import request_permissions, Permission
+                  request_permissions([
+                      Permission.READ_EXTERNAL_STORAGE,
+                      Permission.WRITE_EXTERNAL_STORAGE,
+                  ])
+
+                  # Handle Android 11+ (API 30+) All Files Access
+                  try:
+                      from jnius import autoclass
+                      Environment = autoclass("android.os.Environment")
+                      if not Environment.isExternalStorageManager():
+                          Intent = autoclass("android.content.Intent")
+                          Settings = autoclass("android.provider.Settings")
+                          Uri = autoclass("android.net.Uri")
+                          PythonActivity = autoclass("org.kivy.android.PythonActivity")
+
+                          current_activity = PythonActivity.mActivity
+                          intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+                          uri = Uri.parse(f"package:{current_activity.getPackageName()}")
+                          intent.setData(uri)
+                          current_activity.startActivity(intent)
+                  except Exception:
+                      pass
+
+
+          if __name__ == "__main__":
+              QsToolApp().run()
+          PY
+
       - name: Generate buildozer.spec
         shell: bash
         run: |
@@ -652,16 +637,14 @@ jobs:
           source.exclude_dirs = .git,.buildozer,bin,build,dist,__pycache__
 
           version = 1.0.0
-
-          # 'android' requirement is MANDATORY to prevent startup crash
           requirements = python3,kivy,android
 
           orientation = portrait
           fullscreen = 0
 
-          android.api = 34
+          android.api = 33
           android.minapi = 24
-          android.ndk = 26b
+          android.ndk = 25b
           android.archs = arm64-v8a
 
           android.accept_sdk_license = True
@@ -675,35 +658,6 @@ jobs:
           warn_on_root = 1
           EOF
 
-      # ============================================================
-      # 6. SETUP PYTHON, JAVA & DEPENDENCIES
-      # ============================================================
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Setup Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: "temurin"
-          java-version: "17"
-
-      - name: Install System Dependencies
-        shell: bash
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            git zip unzip pkg-config \
-            autoconf automake libtool zlib1g-dev \
-            libffi-dev libssl-dev cmake
-
-          pip install --upgrade pip setuptools wheel
-          pip install "cython<3.0.0" buildozer
-
-      # ============================================================
-      # 7. BUILD APK
-      # ============================================================
       - name: Build Android APK
         shell: bash
         env:
@@ -712,12 +666,9 @@ jobs:
         run: |
           buildozer -v android debug
 
-      # ============================================================
-      # 8. UPLOAD ARTIFACT
-      # ============================================================
-      - name: Upload APK
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: QsTool-Fixed-Dark-APK
+          name: QsTool-Clean-APK
           path: bin/*.apk
           if-no-files-found: error
