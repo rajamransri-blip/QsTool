@@ -49,6 +49,7 @@ jobs:
           if [ ! -f assets/BGMI.csv ]; then
             echo "filename,path" > assets/BGMI.csv
             echo "BP_PlayerPawn.uasset,ShadowTrackerExtra/Content/Pawn/BP_PlayerPawn.uasset" >> assets/BGMI.csv
+            echo "BP_PlayerPawn.uexp,ShadowTrackerExtra/Content/Pawn/BP_PlayerPawn.uexp" >> assets/BGMI.csv
           fi
 
       - name: Generate Universal PAK Engine (qstool/pak.py)
@@ -59,7 +60,6 @@ jobs:
 
           cat > qstool/pak.py <<'PY'
           import csv
-          import hashlib
           import io
           import os
           import struct
@@ -68,6 +68,9 @@ jobs:
           from pathlib import Path
 
           MAGIC = 0x5A6F12E1
+          UASSET_MAGIC = 0x9E2A83C1
+          LUA_MAGIC = b"\x1bLua"
+          LUAJIT_MAGIC = b"\x1bLJ"
 
 
           class PakError(Exception):
@@ -136,60 +139,54 @@ jobs:
                           reader = csv.reader(f)
                           for row in reader:
                               if len(row) >= 2:
-                                  fname = row[0].strip().lower()
-                                  fpath = row[1].strip()
-                                  self.csv_map[fname] = fpath
+                                  self.csv_map[row[0].strip().lower()] = row[1].strip()
                   except Exception:
                       pass
 
               def open(self):
                   file_size = self.path.stat().st_size
                   if file_size < 64:
-                      raise PakError("Invalid PAK size (too small)")
+                      raise PakError("Invalid file size")
 
                   with self.path.open("rb") as fp:
-                      # 1. Broad Scan Footer (up to 256KB)
-                      scan_window = min(file_size, 262144)
-                      fp.seek(file_size - scan_window)
-                      tail = fp.read(scan_window)
+                      # 1. Search Standard Footer (Last 256KB)
+                      scan_size = min(file_size, 262144)
+                      fp.seek(file_size - scan_size)
+                      tail = fp.read(scan_size)
                       marker = struct.pack("<I", MAGIC)
                       pos = tail.rfind(marker)
 
-                      found_valid = False
-
+                      found = False
                       if pos >= 0:
-                          footer_offset = file_size - scan_window + pos
-                          fp.seek(footer_offset)
-                          magic = struct.unpack("<I", fp.read(4))[0]
+                          fp.seek(file_size - scan_size + pos)
+                          struct.unpack("<I", fp.read(4))
                           self.version = struct.unpack("<I", fp.read(4))[0]
                           self.index_offset = struct.unpack("<q", fp.read(8))[0]
                           self.index_size = struct.unpack("<q", fp.read(8))[0]
-                          fp.read(20)  # hash
+                          fp.read(20)
                           flag = fp.read(1)
                           self.encrypted_index = bool(flag and flag[0] != 0)
+                          if 0 < self.index_size <= file_size and 0 <= self.index_offset <= file_size:
+                              found = True
 
-                          if self.index_size > 0 and self.index_offset > 0 and (self.index_offset + self.index_size <= file_size + 4096):
-                              found_valid = True
-
-                      # 2. If footer was invalid or missing, scan from start of file (Container offset)
-                      if not found_valid:
+                      # 2. Search Container Header (First 64KB)
+                      if not found:
                           fp.seek(0)
                           head = fp.read(min(file_size, 65536))
-                          pos_head = head.find(marker)
-
-                          if pos_head >= 0:
-                              fp.seek(pos_head)
-                              magic = struct.unpack("<I", fp.read(4))[0]
+                          pos_h = head.find(marker)
+                          if pos_h >= 0:
+                              fp.seek(pos_h)
+                              struct.unpack("<I", fp.read(4))
                               self.version = struct.unpack("<I", fp.read(4))[0]
                               self.index_offset = struct.unpack("<q", fp.read(8))[0]
                               self.index_size = struct.unpack("<q", fp.read(8))[0]
                               fp.read(20)
                               flag = fp.read(1)
                               self.encrypted_index = bool(flag and flag[0] != 0)
-                              found_valid = True
+                              found = True
 
-                      if not found_valid:
-                          # 3. Fallback: Deep Stream Search for target raw assets if headers are completely stripped/custom
+                      if not found or self.encrypted_index or self.index_size <= 0:
+                          # Container mode fallback
                           self.entries["RAW_SCAN"] = Entry(
                               path="RAW_CONTAINER",
                               offset=0,
@@ -201,15 +198,8 @@ jobs:
                           )
                           return self
 
-                      if self.encrypted_index:
-                          return self
-
-                      # Normalize Index Offset
                       if self.index_offset + self.index_size > file_size:
-                          if self.index_size <= file_size:
-                              fp.seek(file_size - self.index_size)
-                          else:
-                              fp.seek(0)
+                          fp.seek(max(0, file_size - self.index_size))
                       else:
                           fp.seek(self.index_offset)
 
@@ -224,7 +214,6 @@ jobs:
                       mount = reader.fstring()
                       count = reader.i32()
                   except Exception:
-                      # If index is custom or encrypted
                       return
 
                   if count < 0 or count > 5_000_000:
@@ -244,9 +233,7 @@ jobs:
                           break
 
                       for _b in range(block_count):
-                          start = reader.i64()
-                          end = reader.i64()
-                          blocks.append((start, end))
+                          blocks.append((reader.i64(), reader.i64()))
 
                       compression_id = reader.u32()
                       compression = {0: "none", 1: "zlib", 2: "gzip", 3: "zstd"}.get(
@@ -264,27 +251,39 @@ jobs:
                       )
 
               def extract_raw_asset(self, target_name):
-                  # Fallback deep carving directly from binary for custom game patches
-                  needle = target_name.encode("utf-8")
+                  """Deep byte-for-byte stream carver with exact magic headers"""
+                  stem = Path(target_name).stem.encode("utf-8")
+                  ext = Path(target_name).suffix.lower()
+
                   with self.path.open("rb") as fp:
-                      content = fp.read()
+                      blob = fp.read()
 
-                  idx = content.find(needle)
+                  idx = blob.find(stem)
                   if idx == -1:
-                      # Try without extension
-                      stem = Path(target_name).stem.encode("utf-8")
-                      idx = content.find(stem)
+                      return None
 
-                  if idx != -1:
-                      # Extract chunk surrounding match
-                      start = max(0, idx - 128)
-                      end = min(len(content), idx + 2097152) # 2MB chunk
-                      return content[start:end]
-                  return None
+                  # UAsset parsing
+                  if ext == ".uasset":
+                      uasset_tag = struct.pack("<I", UASSET_MAGIC)
+                      tag_idx = blob.rfind(uasset_tag, 0, idx)
+                      if tag_idx != -1:
+                          return blob[tag_idx:idx + 1048576]
+
+                  # Lua binary bytecode
+                  if ext in (".lua", ".luac"):
+                      l_idx = blob.find(LUA_MAGIC)
+                      if l_idx != -1:
+                          return blob[l_idx:l_idx + 524288]
+                      lj_idx = blob.find(LUAJIT_MAGIC)
+                      if lj_idx != -1:
+                          return blob[lj_idx:lj_idx + 524288]
+
+                  start = max(0, idx - 64)
+                  return blob[start:idx + 524288]
 
               def read_entry(self, entry):
                   if entry.compression == "raw":
-                      return self.extract_raw_asset("BP_PlayerPawn")
+                      return self.extract_raw_asset("BP_PlayerPawn.uasset")
 
                   with self.path.open("rb") as fp:
                       if entry.blocks:
@@ -312,20 +311,23 @@ jobs:
                   return output
           PY
 
-      - name: Generate main.py Application
+      - name: Generate main.py (UI + Telegram Polling Service)
         shell: bash
         run: |
           cat > main.py <<'PY'
           import csv
+          import json
           import os
           import threading
           import time
+          import urllib.parse
+          import urllib.request
           from pathlib import Path
 
           from kivy.app import App
           from kivy.clock import Clock
           from kivy.lang import Builder
-          from kivy.properties import StringProperty, ListProperty
+          from kivy.properties import StringProperty, ListProperty, BooleanProperty
           from kivy.uix.screenmanager import ScreenManager, Screen
           from kivy.utils import platform
 
@@ -353,7 +355,7 @@ jobs:
               BoxLayout:
                   orientation: "vertical"
                   padding: [dp(20), dp(32), dp(20), dp(20)]
-                  spacing: dp(16)
+                  spacing: dp(14)
 
                   BoxLayout:
                       orientation: "vertical"
@@ -370,7 +372,7 @@ jobs:
                           color: 0.95, 0.95, 0.98, 1
 
                       Label:
-                          text: "Universal PAK & Patch Extractor"
+                          text: "Universal PAK/Patch Engine & Telegram Bot"
                           font_size: "13sp"
                           halign: "left"
                           text_size: self.size
@@ -379,12 +381,12 @@ jobs:
                   DarkCard:
                       orientation: "vertical"
                       size_hint_y: None
-                      height: dp(125)
+                      height: dp(120)
                       padding: dp(14)
                       spacing: dp(6)
 
                       Label:
-                          text: "WORKSPACE STORAGE"
+                          text: "STORAGE FOLDERS"
                           font_size: "12sp"
                           bold: True
                           color: 0.38, 0.70, 0.98, 1
@@ -420,7 +422,18 @@ jobs:
                           root.manager.current = "unpack"
 
                   Button:
-                      text: "GRANT ALL STORAGE ACCESS"
+                      text: "TELEGRAM BOT SETTINGS"
+                      font_size: "13sp"
+                      bold: True
+                      size_hint_y: None
+                      height: dp(48)
+                      background_normal: ""
+                      background_color: 0.16, 0.50, 0.72, 1
+                      on_release:
+                          root.manager.current = "settings"
+
+                  Button:
+                      text: "GRANT STORAGE ACCESS"
                       font_size: "13sp"
                       size_hint_y: None
                       height: dp(46)
@@ -483,7 +496,7 @@ jobs:
                       TextInput:
                           id: target
                           text: "BP_PlayerPawn.uasset"
-                          hint_text: "Target filename or ALL"
+                          hint_text: "Filename (e.g. .uasset, .uexp, .lua, or ALL)"
                           multiline: False
                           background_color: 0.13, 0.14, 0.17, 1
                           foreground_color: 1, 1, 1, 1
@@ -492,14 +505,14 @@ jobs:
 
                       Button:
                           text: "Scan"
-                          size_hint_x: 0.35
+                          size_hint_x: 0.32
                           background_normal: ""
                           background_color: 0.16, 0.18, 0.22, 1
                           on_release:
                               root.refresh()
 
                   Button:
-                      text: "START UNPACK"
+                      text: "START UNPACK (EXTRACT ALL / MATCH)"
                       font_size: "14sp"
                       bold: True
                       size_hint_y: None
@@ -525,6 +538,108 @@ jobs:
                       background_color: 0.02, 0.02, 0.03, 1
                       foreground_color: 0.35, 0.88, 0.45, 1
                       padding: [dp(8), dp(8)]
+
+
+          <SettingsScreen>:
+              name: "settings"
+              canvas.before:
+                  Color:
+                      rgba: 0.05, 0.06, 0.08, 1
+                  Rectangle:
+                      pos: self.pos
+                      size: self.size
+
+              BoxLayout:
+                  orientation: "vertical"
+                  padding: [dp(16), dp(20), dp(16), dp(16)]
+                  spacing: dp(12)
+
+                  BoxLayout:
+                      size_hint_y: None
+                      height: dp(40)
+
+                      Label:
+                          text: "Telegram Bot Controller"
+                          font_size: "20sp"
+                          bold: True
+                          halign: "left"
+                          text_size: self.size
+                          color: 0.95, 0.95, 0.98, 1
+
+                      Button:
+                          text: "Back"
+                          size_hint_x: None
+                          width: dp(65)
+                          background_normal: ""
+                          background_color: 0.16, 0.18, 0.22, 1
+                          on_release:
+                              root.manager.current = "home"
+
+                  Label:
+                      text: "Bot Token:"
+                      size_hint_y: None
+                      height: dp(22)
+                      halign: "left"
+                      text_size: self.size
+                      color: 0.75, 0.75, 0.80, 1
+
+                  TextInput:
+                      id: token_input
+                      text: root.bot_token
+                      hint_text: "123456789:ABCDefgh..."
+                      multiline: False
+                      size_hint_y: None
+                      height: dp(44)
+                      background_color: 0.12, 0.13, 0.16, 1
+                      foreground_color: 1, 1, 1, 1
+                      padding: [dp(10), dp(10)]
+
+                  Label:
+                      text: "Authorized Chat ID:"
+                      size_hint_y: None
+                      height: dp(22)
+                      halign: "left"
+                      text_size: self.size
+                      color: 0.75, 0.75, 0.80, 1
+
+                  TextInput:
+                      id: chat_id_input
+                      text: root.chat_id
+                      hint_text: "987654321"
+                      multiline: False
+                      size_hint_y: None
+                      height: dp(44)
+                      background_color: 0.12, 0.13, 0.16, 1
+                      foreground_color: 1, 1, 1, 1
+                      padding: [dp(10), dp(10)]
+
+                  BoxLayout:
+                      size_hint_y: None
+                      height: dp(48)
+                      spacing: dp(10)
+
+                      Button:
+                          text: "Save Config"
+                          background_normal: ""
+                          background_color: 0.22, 0.47, 0.98, 1
+                          on_release:
+                              root.save_config()
+
+                      Button:
+                          text: "Stop Polling" if root.is_polling else "Start Polling"
+                          background_normal: ""
+                          background_color: (0.85, 0.25, 0.25, 1) if root.is_polling else (0.12, 0.65, 0.38, 1)
+                          on_release:
+                              root.toggle_polling()
+
+                  Label:
+                      text: root.bot_status
+                      size_hint_y: None
+                      height: dp(30)
+                      font_size: "12sp"
+                      color: 0.98, 0.76, 0.18, 1
+
+                  Widget:
           """
 
 
@@ -567,7 +682,7 @@ jobs:
                   original = root / "Original"
 
                   if not original.exists():
-                      self.status = "Folder missing. Click GRANT ALL STORAGE ACCESS"
+                      self.status = "Grant storage permission first"
                       return
 
                   try:
@@ -593,23 +708,22 @@ jobs:
                   target = self.ids.target.text.strip()
 
                   if not pak_name or pak_name == "Choose PAK":
-                      self.status = "Error: Select a PAK file"
+                      self.status = "Select a PAK file"
                       return
 
                   if not target:
-                      self.status = "Error: Target cannot be empty"
+                      self.status = "Target cannot be empty"
                       return
 
                   root = storage_root()
                   pak_path = root / "Original" / pak_name
                   self.terminal = ""
-                  self.status = "Unpacking started..."
+                  self.status = "Unpacking..."
 
-                  # Locate BGMI.csv
                   csv_path = None
-                  for candidate in ("assets/BGMI.csv", str(root / "BGMI.csv")):
-                      if os.path.exists(candidate):
-                          csv_path = candidate
+                  for cand in ("assets/BGMI.csv", str(root / "BGMI.csv")):
+                      if os.path.exists(cand):
+                          csv_path = cand
                           break
 
                   thread = threading.Thread(
@@ -623,48 +737,42 @@ jobs:
                   started = time.perf_counter()
                   try:
                       self.log(f"Opening: {pak_path.name}")
-                      if csv_path:
-                          self.log(f"Loaded Path Map: {csv_path}")
-
                       reader = PakReader(pak_path, csv_path=csv_path)
                       reader.open()
 
-                      self.log(f"Version: {reader.version} | Index Entries: {len(reader.entries):,}")
+                      self.log(f"Version: {reader.version} | Entries: {len(reader.entries):,}")
 
                       target_norm = target.replace("\\", "/").strip("/").lower()
+                      stem_target = Path(target_norm).stem.lower()
+
                       wanted = []
-
-                      # Check CSV exact mapped relative path
-                      mapped_path = reader.csv_map.get(target_norm)
-                      if mapped_path:
-                          self.log(f"Found CSV mapped path: {mapped_path}")
-
                       if target.upper() == "ALL":
                           wanted = list(reader.entries.values())
                       else:
                           for entry in reader.entries.values():
                               p_lower = entry.path.lower()
+                              p_stem = Path(entry.path).stem.lower()
+                              # Support .uasset + .uexp + .ubulk + .lua pair extraction
                               if (
                                   p_lower.endswith(target_norm)
                                   or Path(entry.path).name.lower() == target_norm
-                                  or (mapped_path and mapped_path.lower() in p_lower)
+                                  or (stem_target == p_stem)
                               ):
                                   wanted.append(entry)
 
-                      # If not found in index, perform direct stream extraction
                       if not wanted:
-                          self.log(f"Not in index. Scanning raw container stream for {target}...")
-                          raw_data = reader.extract_raw_asset(target)
-                          if raw_data:
+                          self.log(f"Target not indexed. Deep stream carving for {target}...")
+                          data = reader.extract_raw_asset(target)
+                          if data:
                               out_file = unpack_dir / target
-                              out_file.write_bytes(raw_data)
-                              self.log(f"Extracted carved stream: {target} ({len(raw_data):,} bytes)")
+                              out_file.write_bytes(data)
+                              self.log(f"Carved exact stream: {target} ({len(data):,} bytes)")
                               Clock.schedule_once(lambda dt: setattr(self, "status", "Completed (Carved)"))
                               return
                           else:
-                              raise PakError(f"Target '{target}' not found in PAK or stream.")
+                              raise PakError(f"Target '{target}' not found in PAK.")
 
-                      self.log(f"Extracting {len(wanted)} items...")
+                      self.log(f"Extracting {len(wanted)} files (byte-by-byte)...")
                       total_bytes = 0
 
                       for idx, entry in enumerate(wanted, 1):
@@ -676,7 +784,7 @@ jobs:
                           output.write_bytes(data)
 
                           total_bytes += len(data)
-                          if idx % 50 == 0 or idx == len(wanted):
+                          if idx % 20 == 0 or idx == len(wanted):
                               self.log(f"[{idx}/{len(wanted)}] {clean_subpath} ({len(data):,} B)")
 
                       report = structure_dir / f"{pak_path.stem}_structure.txt"
@@ -693,12 +801,71 @@ jobs:
                       Clock.schedule_once(lambda dt: setattr(self, "status", "Failed - Check Logs"))
 
 
+          class SettingsScreen(Screen):
+              bot_token = StringProperty("")
+              chat_id = StringProperty("")
+              bot_status = StringProperty("Bot: Inactive")
+              is_polling = BooleanProperty(False)
+
+              def on_enter(self):
+                  self.load_config()
+
+              def get_config_path(self):
+                  return storage_root() / "bot_config.json"
+
+              def load_config(self):
+                  cfg = self.get_config_path()
+                  if cfg.exists():
+                      try:
+                          data = json.loads(cfg.read_text(encoding="utf-8"))
+                          self.bot_token = data.get("bot_token", "")
+                          self.chat_id = data.get("chat_id", "")
+                          self.ids.token_input.text = self.bot_token
+                          self.ids.chat_id_input.text = self.chat_id
+                      except Exception:
+                          pass
+
+              def save_config(self):
+                  self.bot_token = self.ids.token_input.text.strip()
+                  self.chat_id = self.ids.chat_id_input.text.strip()
+                  cfg = self.get_config_path()
+                  try:
+                      cfg.write_text(
+                          json.dumps({"bot_token": self.bot_token, "chat_id": self.chat_id}),
+                          encoding="utf-8"
+                      )
+                      self.bot_status = "Configuration saved successfully."
+                  except Exception as e:
+                      self.bot_status = f"Error saving: {e}"
+
+              def toggle_polling(self):
+                  app = App.get_running_app()
+                  if self.is_polling:
+                      app.stop_telegram_bot()
+                      self.is_polling = False
+                      self.bot_status = "Polling stopped."
+                  else:
+                      self.save_config()
+                      if not self.bot_token:
+                          self.bot_status = "Token cannot be empty."
+                          return
+                      app.start_telegram_bot(self.bot_token, self.chat_id)
+                      self.is_polling = True
+                      self.bot_status = "Polling active..."
+
+
           class QsToolApp(App):
+              def __init__(self, **kwargs):
+                  super().__init__(**kwargs)
+                  self.bot_running = False
+                  self.bot_thread = None
+
               def build(self):
                   Builder.load_string(KV)
                   sm = ScreenManager()
                   sm.add_widget(HomeScreen(name="home"))
                   sm.add_widget(UnpackScreen(name="unpack"))
+                  sm.add_widget(SettingsScreen(name="settings"))
                   Clock.schedule_once(lambda dt: self.init_app(), 0.3)
                   return sm
 
@@ -709,7 +876,6 @@ jobs:
               def check_and_request_permissions(self):
                   if platform != "android":
                       return
-
                   try:
                       from jnius import autoclass
                       Environment = autoclass("android.os.Environment")
@@ -718,7 +884,6 @@ jobs:
                           Settings = autoclass("android.provider.Settings")
                           Uri = autoclass("android.net.Uri")
                           PythonActivity = autoclass("org.kivy.android.PythonActivity")
-
                           current_activity = PythonActivity.mActivity
                           intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
                           uri = Uri.parse(f"package:{current_activity.getPackageName()}")
@@ -726,6 +891,85 @@ jobs:
                           current_activity.startActivity(intent)
                   except Exception:
                       pass
+
+              def start_telegram_bot(self, token, auth_chat_id):
+                  self.bot_running = True
+                  self.bot_thread = threading.Thread(
+                      target=self._telegram_worker,
+                      args=(token, auth_chat_id),
+                      daemon=True
+                  )
+                  self.bot_thread.start()
+
+              def stop_telegram_bot(self):
+                  self.bot_running = False
+
+              def _telegram_worker(self, token, auth_chat_id):
+                  offset = 0
+                  base_url = f"https://api.telegram.org/bot{token}/"
+
+                  def send_msg(chat_id, text):
+                      try:
+                          url = base_url + "sendMessage"
+                          payload = urllib.parse.urlencode({"chat_id": chat_id, "text": text}).encode()
+                          urllib.request.urlopen(url, data=payload, timeout=10)
+                      except Exception:
+                          pass
+
+                  while self.bot_running:
+                      try:
+                          req_url = f"{base_url}getUpdates?offset={offset}&timeout=15"
+                          with urllib.request.urlopen(req_url, timeout=20) as resp:
+                              res = json.loads(resp.read().decode())
+
+                          if res.get("ok"):
+                              for item in res.get("result", []):
+                                  offset = item["update_id"] + 1
+                                  msg = item.get("message", {})
+                                  text = msg.get("text", "").strip()
+                                  sender_id = str(msg.get("chat", {}).get("id", ""))
+
+                                  if auth_chat_id and sender_id != auth_chat_id:
+                                      continue
+
+                                  if text == "/start" or text == "/help":
+                                      reply = (
+                                          "QsTool Remote Controller:\n"
+                                          "/status - View storage and engine status\n"
+                                          "/list - List detected PAK files\n"
+                                          "/unpack <pak> <target> - Trigger extraction\n"
+                                      )
+                                      send_msg(sender_id, reply)
+
+                                  elif text == "/status":
+                                      root = storage_root()
+                                      send_msg(sender_id, f"QsTool Active on Device\nRoot: {root}")
+
+                                  elif text == "/list":
+                                      root = storage_root()
+                                      paks = [p.name for p in (root / "Original").glob("*.pak")]
+                                      msg_text = "PAKs:\n" + "\n".join(paks) if paks else "No PAKs in Original/"
+                                      send_msg(sender_id, msg_text)
+
+                                  elif text.startswith("/unpack"):
+                                      parts = text.split(maxsplit=2)
+                                      if len(parts) >= 3:
+                                          pak_name, tgt = parts[1], parts[2]
+                                          send_msg(sender_id, f"Unpacking {tgt} from {pak_name}...")
+                                          root = storage_root()
+                                          reader = PakReader(root / "Original" / pak_name)
+                                          reader.open()
+                                          carved = reader.extract_raw_asset(tgt)
+                                          if carved:
+                                              (root / "Unpack" / tgt).write_bytes(carved)
+                                              send_msg(sender_id, f"Success: Extracted {tgt} ({len(carved):,} B)")
+                                          else:
+                                              send_msg(sender_id, f"Failed: {tgt} not located.")
+                                      else:
+                                          send_msg(sender_id, "Usage: /unpack <pak_name> <target_filename>")
+
+                      except Exception:
+                          time.sleep(3)
 
 
           if __name__ == "__main__":
@@ -742,7 +986,7 @@ jobs:
           package.domain = org.qstool
 
           source.dir = .
-          source.include_exts = py,png,jpg,kv,atlas,csv,txt
+          source.include_exts = py,png,jpg,kv,atlas,csv,txt,json
           source.include_patterns = assets/*,qstool/*
           source.exclude_dirs = .git,.buildozer,bin,build,dist,__pycache__
 
@@ -758,7 +1002,7 @@ jobs:
           android.archs = arm64-v8a
 
           android.accept_sdk_license = True
-          android.permissions = READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,MANAGE_EXTERNAL_STORAGE
+          android.permissions = READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,MANAGE_EXTERNAL_STORAGE,INTERNET
 
           p4a.bootstrap = sdl2
           p4a.branch = v2024.01.21
